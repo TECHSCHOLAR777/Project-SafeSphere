@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+import difflib
+import re
 import numpy as np
 import sounddevice as sd
 import torch
@@ -155,11 +157,76 @@ def compute_confidence(result: dict[str, Any]) -> float:
     return float(np.clip(float(np.mean(scores)), 0.0, 1.0))
 
 
-def build_structured_output(result: dict[str, Any], latency_ms: float) -> dict[str, Any]:
+@dataclass(frozen=True)
+class DistressConfig:
+    keywords: list[str]
+    phrases: list[str]
+    min_similarity: float
+
+
+class DistressDetector:
+    def __init__(self, config: DistressConfig) -> None:
+        self.config = config
+
+    def _normalize(self, s: str) -> str:
+        s = s.lower()
+        s = re.sub(r"[^a-z0-9\s]", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    def _ratio(self, a: str, b: str) -> float:
+        return float(difflib.SequenceMatcher(None, a, b).ratio())
+
+    def _best_window_ratio(self, text_tokens: list[str], candidate_norm: str) -> float:
+        cand_tokens = candidate_norm.split()
+        n = len(cand_tokens)
+        if n == 0:
+            return 0.0
+        best = 0.0
+        for i in range(0, max(1, len(text_tokens) - n + 1)):
+            window = " ".join(text_tokens[i : i + n])
+            r = self._ratio(window, candidate_norm)
+            if r > best:
+                best = r
+        return best
+
+    def detect(self, text: str) -> tuple[bool, str]:
+        norm = self._normalize(text)
+        tokens = norm.split()
+        best_score = 0.0
+        best_reason = ""
+        for cand in self.config.phrases:
+            c = self._normalize(cand)
+            score = self._best_window_ratio(tokens, c)
+            if score > best_score:
+                best_score = score
+                best_reason = f"phrase:{cand}"
+        for cand in self.config.keywords:
+            c = self._normalize(cand)
+            score = self._best_window_ratio(tokens, c)
+            if score > best_score:
+                best_score = score
+                best_reason = f"keyword:{cand}"
+        flag = best_score >= self.config.min_similarity
+        reason = best_reason + f" score={best_score:.2f}" if flag else ""
+        return flag, reason
+
+
+def build_structured_output(result: dict[str, Any], latency_ms: float, detector: Optional[DistressDetector] = None) -> dict[str, Any]:
+    text = result.get("text", "").strip()
+    emergency_flag = False
+    trigger_reason = ""
+    if detector is not None and text:
+        try:
+            emergency_flag, trigger_reason = detector.detect(text)
+        except Exception as e:
+            logging.exception(f"Detection error: {e}")
     return {
-        "transcription": result.get("text", "").strip(),
+        "transcription": text,
         "confidence": compute_confidence(result),
         "latency_ms": float(latency_ms),
+        "emergency_flag": bool(emergency_flag),
+        "trigger_reason": trigger_reason,
     }
 
 
@@ -202,6 +269,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         sub.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
         sub.add_argument("--fp16", action="store_true", help="Enable fp16 when using CUDA")
         sub.add_argument("--json", action="store_true", help="Output JSON instead of plain text")
+        sub.add_argument("--emergency-keyword", action="append", default=[], help="Add distress keyword")
+        sub.add_argument("--emergency-phrase", action="append", default=[], help="Add distress phrase")
+        sub.add_argument("--emergency-threshold", type=float, default=0.82, help="Fuzzy match threshold [0-1]")
 
     return parser
 
@@ -218,7 +288,8 @@ def run_file_mode(engine: WhisperEngine, args: argparse.Namespace) -> dict[str, 
     start = time.perf_counter()
     result = engine.transcribe_file(audio_path)
     latency_ms = (time.perf_counter() - start) * 1000.0
-    return build_structured_output(result, latency_ms)
+    detector = build_distress_detector(args)
+    return build_structured_output(result, latency_ms, detector)
 
 
 def run_mic_mode(engine: WhisperEngine, args: argparse.Namespace) -> dict[str, Any]:
@@ -230,11 +301,42 @@ def run_mic_mode(engine: WhisperEngine, args: argparse.Namespace) -> dict[str, A
         capture.stop()
     if audio.size == 0:
         logging.warning("No speech detected")
-        return {"transcription": "", "confidence": 0.0, "latency_ms": 0.0}
+        return {"transcription": "", "confidence": 0.0, "latency_ms": 0.0, "emergency_flag": False, "trigger_reason": ""}
     start = time.perf_counter()
     result = engine.transcribe_audio(audio)
     latency_ms = (time.perf_counter() - start) * 1000.0
-    return build_structured_output(result, latency_ms)
+    detector = build_distress_detector(args)
+    return build_structured_output(result, latency_ms, detector)
+
+
+def build_distress_detector(args: argparse.Namespace) -> DistressDetector:
+    default_keywords = [
+        "help",
+        "emergency",
+        "danger",
+        "police",
+        "911",
+        "stop",
+        "no",
+        "don't",
+        "please help",
+        "assault",
+        "harassment",
+    ]
+    default_phrases = [
+        "i need help",
+        "please help me",
+        "call the police",
+        "call 911",
+        "i'm in danger",
+        "leave me alone",
+        "stop it",
+        "don't touch me",
+    ]
+    merged_keywords = default_keywords + (args.emergency_keyword or [])
+    merged_phrases = default_phrases + (args.emergency_phrase or [])
+    cfg = DistressConfig(keywords=merged_keywords, phrases=merged_phrases, min_similarity=float(args.emergency_threshold))
+    return DistressDetector(cfg)
 
 
 def main() -> None:
