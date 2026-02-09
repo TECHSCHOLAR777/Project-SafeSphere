@@ -1,0 +1,10 @@
+openai-whisper
+torch
+torchaudio
+sounddevice
+numpy
+scipy
+opencv-python
+networkx
+fastapi
+uvicorn
