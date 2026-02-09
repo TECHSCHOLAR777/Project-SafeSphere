@@ -11,10 +11,12 @@ from typing import Any, Optional
 
 import difflib
 import re
+from collections import deque
 import numpy as np
 import sounddevice as sd
 import torch
 import whisper
+from scipy import signal
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,103 @@ class RealTimeAudioCapture:
             return np.array([], dtype=np.float32)
         audio = np.concatenate(frames_collected, axis=0)
         return np.squeeze(audio)
+
+
+class NoiseFilter:
+    def __init__(self, sample_rate: int, highpass_hz: int = 100, preemph: float = 0.97) -> None:
+        self.sample_rate = sample_rate
+        self.preemph = preemph
+        wn = float(highpass_hz) / (sample_rate / 2.0)
+        wn = min(max(wn, 1e-4), 0.99)
+        self.b, self.a = signal.butter(2, wn, btype="highpass")
+        self.zi = signal.lfilter_zi(self.b, self.a)
+
+    def apply(self, x: np.ndarray) -> np.ndarray:
+        if x.ndim > 1:
+            x = np.squeeze(x)
+        y, self.zi = signal.lfilter(self.b, self.a, x, zi=self.zi)
+        z = np.empty_like(y)
+        z[0] = y[0]
+        z[1:] = y[1:] - self.preemph * y[:-1]
+        return z
+
+
+class ContinuousListener:
+    def __init__(self, sample_rate: int, frame_ms: int, min_chunk_ms: int, silence_ms: int, energy_factor: float, idle_sleep_ms: int, noise_filter: NoiseFilter) -> None:
+        self.sample_rate = sample_rate
+        self.frame_samples = int(sample_rate * frame_ms / 1000)
+        self.required_silence_frames = max(1, int(silence_ms / frame_ms))
+        self.min_chunk_frames = max(1, int(min_chunk_ms / frame_ms))
+        self.energy_factor = energy_factor
+        self.idle_sleep_ms = idle_sleep_ms
+        self.filter = noise_filter
+        self.q: queue.Queue[np.ndarray] = queue.Queue()
+        self.stream: Optional[sd.InputStream] = None
+        self.noise_floor = 1e-4
+        self.alpha = 0.995
+        self.buffer: deque[np.ndarray] = deque()
+        self.voiced = False
+        self.silence_count = 0
+        self.last_processed_len = 0
+        self.processed_interim = False
+
+    def _callback(self, indata: np.ndarray, frames: int, time_info: dict[str, Any], status: sd.CallbackFlags) -> None:
+        if status:
+            logging.warning(f"Audio status: {status}")
+        x = self.filter.apply(indata.copy())
+        self.q.put(x)
+
+    def start(self) -> None:
+        self.stream = sd.InputStream(samplerate=self.sample_rate, channels=1, dtype="float32", blocksize=self.frame_samples, callback=self._callback)
+        self.stream.start()
+        logging.info("Continuous listening started")
+
+    def stop(self) -> None:
+        if self.stream:
+            self.stream.stop()
+            self.stream.close()
+            self.stream = None
+            logging.info("Continuous listening stopped")
+
+    def _rms(self, x: np.ndarray) -> float:
+        return float(np.sqrt(np.mean(np.square(x))))
+
+    def _update_noise(self, e: float) -> None:
+        self.noise_floor = self.alpha * self.noise_floor + (1.0 - self.alpha) * e
+
+    def _energy_threshold(self) -> float:
+        return max(1e-5, self.energy_factor * self.noise_floor)
+
+    def next_chunk(self) -> Optional[np.ndarray]:
+        try:
+            frame = self.q.get(timeout=self.idle_sleep_ms / 1000.0)
+        except queue.Empty:
+            return None
+        e = self._rms(frame)
+        thr = self._energy_threshold()
+        if e < thr:
+            self._update_noise(e)
+        if e >= thr:
+            self.voiced = True
+            self.silence_count = 0
+            self.buffer.append(frame)
+            if len(self.buffer) >= self.min_chunk_frames and not self.processed_interim:
+                self.processed_interim = True
+                self.last_processed_len = len(self.buffer)
+                return np.squeeze(np.concatenate(list(self.buffer), axis=0))
+        else:
+            if self.voiced:
+                self.silence_count += 1
+                if self.silence_count >= self.required_silence_frames:
+                    if self.buffer:
+                        chunk = np.squeeze(np.concatenate(list(self.buffer), axis=0))
+                        self.buffer.clear()
+                        self.voiced = False
+                        self.silence_count = 0
+                        self.processed_interim = False
+                        self.last_processed_len = 0
+                        return chunk
+        return None
 
 
 class WhisperEngine:
@@ -262,7 +361,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     mic_parser.add_argument("--duration", type=float, default=5.0, help="Recording duration in seconds")
     mic_parser.add_argument("--sample-rate", type=int, default=16000, help="Microphone sample rate")
 
+    listen_parser = subparsers.add_parser("listen", help="Continuous listening and low-latency transcription")
+    listen_parser.add_argument("--sample-rate", type=int, default=16000, help="Microphone sample rate")
+    listen_parser.add_argument("--frame-ms", type=int, default=30, help="Frame size in ms")
+    listen_parser.add_argument("--min-chunk-ms", type=int, default=1200, help="Minimum voiced chunk length")
+    listen_parser.add_argument("--silence-ms", type=int, default=600, help="Silence to end utterance")
+    listen_parser.add_argument("--energy-factor", type=float, default=3.0, help="Energy factor above noise floor")
+    listen_parser.add_argument("--idle-sleep-ms", type=int, default=20, help="Sleep when idle")
+    listen_parser.add_argument("--highpass-hz", type=int, default=100, help="High-pass cutoff")
+    listen_parser.add_argument("--preemph", type=float, default=0.97, help="Preemphasis coefficient")
+
     for sub in (file_parser, mic_parser):
+        sub.add_argument("--model", type=str, default="base", help="Whisper model size")
+        sub.add_argument("--language", type=str, default=None, help="Spoken language code")
+        sub.add_argument("--task", type=str, default="transcribe", choices=["transcribe", "translate"])
+        sub.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
+        sub.add_argument("--fp16", action="store_true", help="Enable fp16 when using CUDA")
+        sub.add_argument("--json", action="store_true", help="Output JSON instead of plain text")
+        sub.add_argument("--emergency-keyword", action="append", default=[], help="Add distress keyword")
+        sub.add_argument("--emergency-phrase", action="append", default=[], help="Add distress phrase")
+        sub.add_argument("--emergency-threshold", type=float, default=0.82, help="Fuzzy match threshold [0-1]")
+
+    for sub in (listen_parser,):
         sub.add_argument("--model", type=str, default="base", help="Whisper model size")
         sub.add_argument("--language", type=str, default=None, help="Spoken language code")
         sub.add_argument("--task", type=str, default="transcribe", choices=["transcribe", "translate"])
@@ -291,6 +411,32 @@ def run_file_mode(engine: WhisperEngine, args: argparse.Namespace) -> dict[str, 
     detector = build_distress_detector(args)
     return build_structured_output(result, latency_ms, detector)
 
+
+def run_listen_mode(engine: WhisperEngine, args: argparse.Namespace) -> None:
+    nf = NoiseFilter(sample_rate=args.sample_rate, highpass_hz=args.highpass_hz, preemph=args.preemph)
+    listener = ContinuousListener(
+        sample_rate=args.sample_rate,
+        frame_ms=args.frame_ms,
+        min_chunk_ms=args.min_chunk_ms,
+        silence_ms=args.silence_ms,
+        energy_factor=args.energy_factor,
+        idle_sleep_ms=args.idle_sleep_ms,
+        noise_filter=nf,
+    )
+    detector = build_distress_detector(args)
+    try:
+        listener.start()
+        while True:
+            chunk = listener.next_chunk()
+            if chunk is None:
+                continue
+            start = time.perf_counter()
+            result = engine.transcribe_audio(chunk)
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            payload = build_structured_output(result, latency_ms, detector)
+            print(json.dumps(payload, ensure_ascii=False))
+    finally:
+        listener.stop()
 
 def run_mic_mode(engine: WhisperEngine, args: argparse.Namespace) -> dict[str, Any]:
     capture = RealTimeAudioCapture(sample_rate=args.sample_rate)
@@ -354,11 +500,18 @@ def main() -> None:
         except Exception as e:
             logging.exception(f"File mode error: {e}")
             result = {"transcription": "", "confidence": 0.0, "latency_ms": 0.0}
-    else:
+    elif args.mode == "mic":
         try:
             result = run_mic_mode(engine, args)
         except Exception as e:
             logging.exception(f"Mic mode error: {e}")
+            result = {"transcription": "", "confidence": 0.0, "latency_ms": 0.0}
+    else:
+        try:
+            run_listen_mode(engine, args)
+            return
+        except Exception as e:
+            logging.exception(f"Listen mode error: {e}")
             result = {"transcription": "", "confidence": 0.0, "latency_ms": 0.0}
 
     output_result(result, args.json)
