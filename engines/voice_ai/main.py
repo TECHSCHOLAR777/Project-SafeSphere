@@ -471,9 +471,14 @@ def build_distress_detector(args: argparse.Namespace) -> DistressDetector:
     raise RuntimeError("CLI has been removed; use build_distress_detector_from_config()")
 
 
-def main() -> None:
-    raise RuntimeError("CLI has been removed; import VoiceAIEngine and call its methods")
+from engines.voice_ai.inference.speech_recognizer import VoiceAIEngine
+def main():
+    engine = VoiceAIEngine()
+    print("\n🎙 Speak now...\n")
+    result = engine.run_once()
 
+    for k, v in result.items():
+        print(f"{k}: {v}")
 
 if __name__ == "__main__":
     main()
