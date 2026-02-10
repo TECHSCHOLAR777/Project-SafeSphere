@@ -32,7 +32,9 @@ class SafeSphereThreatsCV:
     - Emergency alert generation
     """
 
-    def __init__(self, enable_recording: bool = True, backend_url: str = "http://localhost:8000"):
+    def __init__(self, enable_recording: bool = True, backend_url: str = "http://localhost:8000",
+                 location_lat: float = None, location_lng: float = None,
+                 source_id: str = None, mode: str = "cctv"):
         """Initialize threat detection engine."""
         print("\n" + "="*80)
         print("🛡️  SAFESPHERE THREAT DETECTION ENGINE v1.0")
@@ -63,6 +65,10 @@ class SafeSphereThreatsCV:
         self.frame_buffer = deque(maxlen=30)  # Keep last 30 frames for context
         self.high_threat_threshold = 0.6
         self.alert_history = {}  # Track alerted incidents to avoid spam
+        self.location_lat = location_lat
+        self.location_lng = location_lng
+        self.source_id = source_id
+        self.mode = mode
 
     def _check_backend(self):
         """Check if backend API is available."""
@@ -110,6 +116,12 @@ class SafeSphereThreatsCV:
         return {
             "timestamp": datetime.now().isoformat(),
             "frame_number": frame_num,
+            "location": {
+                "latitude": self.location_lat,
+                "longitude": self.location_lng,
+                "source_id": self.source_id,
+                "mode": self.mode
+            },
             "motion": {
                 "level": motion_result.get("motion_level", "unknown"),
             },
@@ -241,7 +253,11 @@ class SafeSphereThreatsCV:
             "weapon_types": result["weapon_result"].get("weapon_types", []),
             "behavior_summary": f"Risk: {result['classification'].get('reasoning', ['Unknown'])[0]}",
             "is_critical": is_critical,
-            "full_telemetry": result["telemetry"]
+            "full_telemetry": result["telemetry"],
+            "latitude": self.location_lat,
+            "longitude": self.location_lng,
+            "source_id": self.source_id,
+            "mode": self.mode
         }
         
         if self.backend_available:

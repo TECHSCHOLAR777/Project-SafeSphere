@@ -1,0 +1,30 @@
+{
+  "incident_id": "INC_20260211_000344_020",
+  "timestamp": "2026-02-11T00:03:44.906287",
+  "type": "suspicious_activity",
+  "model_rank": 0.855,
+  "people_count": 3,
+  "weapon_detected": false,
+  "weapon_types": [],
+  "behavior_summary": "seeded",
+  "is_critical": true,
+  "full_telemetry": {
+    "location": {
+      "latitude": 37.78259834281924,
+      "longitude": -122.41751081327564,
+      "mode": "cctv",
+      "source_id": "SEED2_020"
+    },
+    "behavior": {
+      "pair_interactions": []
+    },
+    "context_factors": {
+      "isolation": false
+    }
+  },
+  "latitude": 37.78259834281924,
+  "longitude": -122.41751081327564,
+  "source_id": "SEED2_020",
+  "mode": "cctv",
+  "location_accuracy_m": 25.0
+}
