@@ -1,0 +1,19 @@
+{
+  "incident_id": "string",
+  "timestamp": "string",
+  "type": "weapon",
+  "model_rank": 0.75,
+  "people_count": 0,
+  "weapon_detected": true,
+  "weapon_types": [],
+  "behavior_summary": "string",
+  "is_critical": true,
+  "full_telemetry": {
+    "additionalProp1": {}
+  },
+  "latitude": 0.0,
+  "longitude": 0.0,
+  "source_id": "string",
+  "mode": "string",
+  "location_accuracy_m": 0.0
+}

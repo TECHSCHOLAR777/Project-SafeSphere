@@ -1,0 +1,24 @@
+{
+  "incident_id": "INC_20260210_234745_038",
+  "timestamp": "2026-02-10T23:47:45.500628",
+  "threat_level": "LOW",
+  "threat_score": 0.28195660503388364,
+  "people_count": 1,
+  "weapon_detected": false,
+  "weapon_types": [],
+  "behavior_summary": "seeded",
+  "is_critical": false,
+  "full_telemetry": {
+    "location": {
+      "latitude": 37.774566612532716,
+      "longitude": -122.41976579550001,
+      "mode": "cctv",
+      "source_id": "SEED_CAM_038"
+    }
+  },
+  "latitude": 37.774566612532716,
+  "longitude": -122.41976579550001,
+  "source_id": "SEED_CAM_038",
+  "mode": "cctv",
+  "location_accuracy_m": 25.0
+}
