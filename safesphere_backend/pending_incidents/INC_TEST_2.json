@@ -1,0 +1,19 @@
+{
+  "incident_id": "INC_TEST_2",
+  "timestamp": "2026-02-10T23:15:55.3910042+05:30",
+  "threat_level": "CRITICAL",
+  "threat_score": 0.92,
+  "people_count": 3,
+  "weapon_detected": true,
+  "weapon_types": [
+    "gun"
+  ],
+  "behavior_summary": "Weapon visible",
+  "is_critical": true,
+  "full_telemetry": {},
+  "latitude": 37.776,
+  "longitude": -122.418,
+  "source_id": "CAM_02",
+  "location_accuracy_m": null,
+  "mode": "cctv"
+}
