@@ -5,7 +5,7 @@
 // ============================================
 // TOAST NOTIFICATIONS
 // ============================================
-
+import supabase from './Supabase.js';
 class Toast {
     static show(message, type = 'info', duration = 3000) {
         const container = document.getElementById('toastContainer');
@@ -311,18 +311,35 @@ class ActionHandler {
         Toast.show('🚨 SOS Alert Sent! Emergency contacts notified.', 'error', 4000);
         
         // Try to send to API
-        fetch('/api/sos', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                type: 'SOS',
-                details: 'SOS Button Pressed',
-                location: { lat: 0, lng: 0 }
-            })
-        }).catch(() => {
-            // Offline mode
-            console.log('API unavailable - running in offline mode');
-        });
+        const API_URL = 'https://improved-train-v679p9p5jr5p35gp-8000.app.github.dev/api/sos';
+
+        const sendSOS = (latitude = 0, longitude = 0) => {
+            fetch(API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    type: 'SOS',
+                    details: 'SOS Button Pressed',
+                    location: { lat: latitude, lng: longitude }
+                })
+            }).catch((error) => {
+                // Offline mode
+                console.error("SOS API Failed:", error);
+                console.log('API unavailable - running in offline mode');
+            });
+        };
+
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(
+                (position) => sendSOS(position.coords.latitude, position.coords.longitude),
+                (error) => {
+                    console.error("Geolocation error:", error);
+                    sendSOS();
+                }
+            );
+        } else {
+            sendSOS();
+        }
 
         // Visual feedback
         const sosButton = document.getElementById('sosButton');
