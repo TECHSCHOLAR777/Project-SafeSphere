@@ -747,6 +747,7 @@ try {
 
                 let routeLayer = null;
                 let destMarker = null;
+                let threatLayer = L.layerGroup().addTo(map);
 
                 goBtn.addEventListener('click', async () => {
                     const query = input.value.trim();
@@ -794,12 +795,14 @@ try {
 
                         if (routeData.success && routeData.route) {
                             if (routeLayer) map.removeLayer(routeLayer);
+                            threatLayer.clearLayers();
                             
                             // Draw route
                             const coords = routeData.route.geometry.coordinates.map(c => [c[1], c[0]]); // GeoJSON is lng,lat -> Leaflet lat,lng
                             
                             // Color based on risk
-                            const color = routeData.risk_score > 5 ? '#ef4444' : (routeData.risk_score > 1 ? '#f59e0b' : '#10b981');
+                            // Adjusted for new high penalties (>50 is likely a high threat)
+                            const color = routeData.risk_score > 50 ? '#ef4444' : (routeData.risk_score > 1 ? '#f59e0b' : '#10b981');
                             
                             routeLayer = L.polyline(coords, {
                                 color: color,
@@ -807,6 +810,29 @@ try {
                                 opacity: 0.8,
                                 lineCap: 'round'
                             }).addTo(map);
+
+                            // Draw threats
+                            if (routeData.threats && routeData.threats.length > 0) {
+                                routeData.threats.forEach(threat => {
+                                    const tLat = threat.latitude;
+                                    const tLng = threat.longitude;
+                                    const level = threat.threat_level || 'MEDIUM';
+                                    
+                                    let tColor = '#f59e0b';
+                                    if (level === 'HIGH' || level === 'CRITICAL') tColor = '#ef4444';
+                                    
+                                    L.circle([tLat, tLng], {
+                                        color: tColor,
+                                        fillColor: tColor,
+                                        fillOpacity: 0.3,
+                                        radius: 300,
+                                        weight: 1
+                                    }).addTo(threatLayer).bindPopup(`
+                                        <strong>${level} THREAT</strong><br>
+                                        ${threat.behavior_summary || 'Suspicious activity'}
+                                    `);
+                                });
+                            }
 
                             // Update UI
                             badge.textContent = routeData.safety_status;

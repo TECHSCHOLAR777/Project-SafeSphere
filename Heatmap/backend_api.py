@@ -342,8 +342,8 @@ def _calculate_route_risk(route_geo: Dict, incidents: List[Dict]) -> float:
         return 0.0
     
     total_risk = 0.0
-    # Sample points to avoid heavy computation (every 10th point)
-    sample_points = coordinates[::10]
+    # Sample points to avoid heavy computation (every 2nd point for better precision)
+    sample_points = coordinates[::2]
     if not sample_points:
         sample_points = coordinates
 
@@ -365,10 +365,21 @@ def _calculate_route_risk(route_geo: Dict, incidents: List[Dict]) -> float:
             
             # If incident is within 300m of route path
             if dist < 0.3:
-                severity = _severity_weight(inc.get("threat_level", "LOW"), inc.get("threat_score", 0.0))
+                base_severity = _severity_weight(inc.get("threat_level", "LOW"), inc.get("threat_score", 0.0))
+                
+                # Apply multipliers for route selection to strongly discourage high threats
+                level = inc.get("threat_level", "LOW").upper()
+                multiplier = 1.0
+                if level == "CRITICAL":
+                    multiplier = 100.0 # Massive penalty to force avoidance
+                elif level == "HIGH":
+                    multiplier = 50.0
+                elif level == "MEDIUM":
+                    multiplier = 10.0
+                
                 # Higher risk if closer
                 proximity_factor = (1.0 - (dist / 0.3))
-                total_risk += severity * proximity_factor
+                total_risk += base_severity * multiplier * proximity_factor
 
     return total_risk
 
@@ -450,6 +461,20 @@ async def calculate_safe_route(req: RouteRequest):
         # In production, use geospatial query for bounding box of route
         incidents = _load_incidents_from_db(limit=500)
         
+        # Filter incidents for visualization (bounding box of the trip + buffer)
+        margin = 0.02 # approx 2km buffer
+        min_lat = min(req.start_lat, req.end_lat) - margin
+        max_lat = max(req.start_lat, req.end_lat) + margin
+        min_lng = min(req.start_lng, req.end_lng) - margin
+        max_lng = max(req.start_lng, req.end_lng) + margin
+        
+        nearby_threats = []
+        for inc in incidents:
+            lat = inc.get("latitude")
+            lng = inc.get("longitude")
+            if lat is not None and lng is not None and min_lat <= lat <= max_lat and min_lng <= lng <= max_lng:
+                nearby_threats.append(inc)
+        
         # 3. Score each route
         scored_routes = []
         for route in routes:
@@ -461,8 +486,9 @@ async def calculate_safe_route(req: RouteRequest):
                 "risk_score": round(risk_score, 2)
             })
         
-        # 4. Sort by risk score (lowest first)
-        scored_routes.sort(key=lambda x: x["risk_score"])
+        # 4. Sort by risk score (lowest first), then by distance
+        # This ensures we pick the safest route, even if it's much longer
+        scored_routes.sort(key=lambda x: (x["risk_score"], x["distance"]))
         
         best_route = scored_routes[0]
         is_safe = best_route["risk_score"] < 1.0
@@ -472,7 +498,8 @@ async def calculate_safe_route(req: RouteRequest):
             "route": best_route,
             "alternatives_analyzed": len(routes),
             "safety_status": "SAFE" if is_safe else "CAUTION",
-            "risk_score": best_route["risk_score"]
+            "risk_score": best_route["risk_score"],
+            "threats": nearby_threats
         }
 
     except Exception as e:
