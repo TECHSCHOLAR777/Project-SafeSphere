@@ -1,0 +1,13 @@
+openai-whisper
+torch
+torchaudio
+sounddevice
+numpy
+scipy
+opencv-python-headless
+networkx
+fastapi
+uvicorn[standard]
+supabase
+python-dotenv
+python-multipart
