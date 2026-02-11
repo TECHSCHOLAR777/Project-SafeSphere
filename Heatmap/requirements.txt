@@ -8,3 +8,6 @@ opencv-python
 networkx
 fastapi
 uvicorn
+supabase
+dotenv
+python-multipart
