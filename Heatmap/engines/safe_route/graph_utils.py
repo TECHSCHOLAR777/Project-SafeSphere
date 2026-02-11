@@ -470,3 +470,121 @@ class GraphUtils:
             "avg_speed": round(total_distance / total_time, 2) if total_time > 0 else 0.0,
             "segments": segments_time,
         }
+
+    @staticmethod
+    def validate_route_safety(
+        coordinates: List[Tuple[float, float]],
+        threat_zone_manager,
+        strict_mode: bool = True,
+        buffer_km: float = 0.1
+    ) -> Dict:
+        """
+        Validate if a route is safe by checking against threat zones.
+        
+        This method ensures routes do not intersect with threat circles,
+        providing hard safety guarantees rather than soft scoring.
+        
+        Args:
+            coordinates: List of (lng, lat) tuples forming the route
+            threat_zone_manager: ThreatZoneManager instance with loaded threats
+            strict_mode: If True, reject routes touching threat zones
+            buffer_km: Safety buffer around threat zones
+            
+        Returns:
+            Dict with:
+            - is_safe: bool - True if route is safe
+            - threat_intersections: List of intersected threat zones
+            - closest_threat: Dict with nearest threat info
+            - safety_score: float 0.0-1.0 (1.0 = completely safe)
+        """
+        # Check for intersections with threat zones
+        intersects, first_zone = threat_zone_manager.route_intersects_any_threat(
+            coordinates,
+            buffer_km=buffer_km,
+            threat_levels_to_avoid=["CRITICAL", "HIGH", "MEDIUM"]
+        )
+        
+        threat_intersections = []
+        if intersects:
+            threat_intersections.append({
+                "zone_id": first_zone.zone_id,
+                "threat_level": first_zone.threat_level,
+                "radius_km": first_zone.radius_km,
+            })
+        
+        # Get closest threat
+        closest = threat_zone_manager.get_closest_threat_to_route(coordinates)
+        
+        # Calculate safety score
+        if closest:
+            min_dist = closest.get("min_distance_km", 0)
+            # Safety score: 1.0 if >2km away, 0.0 if inside threat zone, linear in between
+            safety_score = max(0.0, min(1.0, min_dist / 2.0))
+            is_inside_zone = closest.get("inside_zone", False)
+            is_safe = not is_inside_zone and not intersects
+        else:
+            safety_score = 1.0
+            is_safe = True
+        
+        return {
+            "is_safe": is_safe,
+            "threat_intersections": threat_intersections,
+            "closest_threat": closest,
+            "safety_score": round(safety_score, 3),
+            "has_critical_threat": len([t for t in threat_intersections if t["threat_level"] == "CRITICAL"]) > 0,
+        }
+
+    @staticmethod
+    def rank_routes_by_safety(
+        routes: List[Dict],
+        threat_zone_manager,
+        keep_unsafe: bool = False
+    ) -> List[Dict]:
+        """
+        Rank routes by safety, filtering out those that cross threat zones.
+        
+        Args:
+            routes: List of dicts with 'geometry' containing coordinates
+            threat_zone_manager: ThreatZoneManager with loaded threats
+            keep_unsafe: If True, keep unsafe routes but rank them lower
+            
+        Returns:
+            Sorted list of routes with safety metrics added
+        """
+        ranked_routes = []
+        
+        for route in routes:
+            coordinates = route.get("geometry", {}).get("coordinates", [])
+            if not coordinates:
+                ranked_routes.append({
+                    **route,
+                    "safety_metrics": {
+                        "is_safe": True,
+                        "safety_score": 1.0,
+                        "threat_intersections": [],
+                    }
+                })
+                continue
+            
+            safety_metrics = GraphUtils.validate_route_safety(
+                coordinates,
+                threat_zone_manager,
+                strict_mode=True,
+                buffer_km=0.1
+            )
+            
+            ranked_routes.append({
+                **route,
+                "safety_metrics": safety_metrics,
+            })
+        
+        # Sort by safety score (higher is better), then filter
+        ranked_routes.sort(key=lambda r: r["safety_metrics"]["safety_score"], reverse=True)
+        
+        if not keep_unsafe:
+            # Keep only safe routes, or if none exist, keep all
+            safe_routes = [r for r in ranked_routes if r["safety_metrics"]["is_safe"]]
+            if safe_routes:
+                ranked_routes = safe_routes
+        
+        return ranked_routes

@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS public.sos_alerts (
     status VARCHAR(20) DEFAULT 'active', -- active, resolved, canceled
     video_path TEXT, -- Path to the SOS video file, if applicable
     incident_id VARCHAR(100), -- Link to the incident created from video analysis
+    severity VARCHAR(20) DEFAULT 'CRITICAL', -- LOW, MEDIUM, HIGH, CRITICAL
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
 

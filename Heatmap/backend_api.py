@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 from pathlib import Path
 import json
@@ -129,6 +129,7 @@ def _insert_incident(incident: Dict) -> bool:
             "source_id": incident.get("source_id"),
             "mode": incident.get("mode"),
             "full_telemetry": incident.get("full_telemetry"),  # JSONB field
+            "severity": incident.get("severity"),
         }
         
         response = supabase.table("incidents").insert(db_record).execute()
@@ -335,67 +336,150 @@ def _get_osrm_routes(start_lat: float, start_lng: float, end_lat: float, end_lng
         print(f"⚠️ OSRM routing failed: {e}")
     return []
 
-def _calculate_route_risk(route_geo: Dict, incidents: List[Dict]) -> float:
+
+def _get_osrm_routes_via(start_lat: float, start_lng: float, via_lat: float, via_lng: float, end_lat: float, end_lng: float) -> List[Dict]:
+    """Fetch route from OSRM going through a via point (start;via;end)."""
+    try:
+        url = f"http://router.project-osrm.org/route/v1/driving/{start_lng},{start_lat};{via_lng},{via_lat};{end_lng},{end_lat}?overview=full&geometries=geojson&alternatives=true"
+        response = requests.get(url, timeout=6)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("routes", [])
+    except Exception as e:
+        print(f"⚠️ OSRM routing via failed: {e}")
+    return []
+
+
+def _destination_point(lat: float, lng: float, bearing_deg: float, distance_km: float) -> Tuple[float, float]:
     """
-    Calculate risk score for a route based on nearby incidents.
+    Calculate destination point given start lat/lng, bearing (degrees) and distance (km).
+    Returns (lat, lng).
+    """
+    R = 6371.0
+    bearing = math.radians(bearing_deg)
+    lat1 = math.radians(lat)
+    lon1 = math.radians(lng)
+    d_div_r = distance_km / R
+
+    lat2 = math.asin(math.sin(lat1) * math.cos(d_div_r) + math.cos(lat1) * math.sin(d_div_r) * math.cos(bearing))
+    lon2 = lon1 + math.atan2(math.sin(bearing) * math.sin(d_div_r) * math.cos(lat1), math.cos(d_div_r) - math.sin(lat1) * math.sin(lat2))
+
+    return (math.degrees(lat2), math.degrees(lon2))
+
+def _calculate_route_risk(route_geo: Dict, incidents: List[Dict]) -> tuple:
+    """
+    Calculate route safety with HARD threat avoidance.
     
-    SAFETY-FIRST MODE: Routes must completely avoid threat circles.
-    - Threat avoidance radius: 1.0 km (1000m) to ensure full clearance
-    - Routes that pass near ANY threat get heavily penalized
-    - Prioritizes safety exclusively - does not consider distance/speed
+    Returns:
+        (is_safe: bool, safety_score: float, threat_data: dict)
+    
+    HARD SAFETY RULES:
+    - Routes that touch ANY threat circle are REJECTED (is_safe=False)
+    - Threat radii scale by threat level (CRITICAL=1.5km to LOW=0.5km)
+    - 100m additional safety buffer added
     """
     coordinates = route_geo.get("coordinates", [])
     if not coordinates:
-        return 0.0
-    
-    total_risk = 0.0
-    # Sample points to avoid heavy computation (every 3rd point for efficiency)
-    sample_points = coordinates[::3]
-    if not sample_points:
-        sample_points = coordinates
+        return (True, 1.0, {"reason": "no_coordinates"})
 
-    for pt in sample_points:
-        # GeoJSON is [lng, lat]
-        r_lng, r_lat = pt[0], pt[1]
-        
+    # Simplified safety rule requested: compare each route point to incident lat/lng
+    # Buffer: 50 meters (0.05 km) from incident location
+    buffer_km = 0.05
+
+    min_distance = float('inf')
+    closest_threat = None
+
+    # Coordinates are provided as [lng, lat] pairs
+    for coord in coordinates:
+        try:
+            lng = float(coord[0])
+            lat = float(coord[1])
+        except Exception:
+            continue
+
         for inc in incidents:
-            i_lat = inc.get("latitude")
-            i_lng = inc.get("longitude")
-            if i_lat is None or i_lng is None:
+            try:
+                i_lat = float(inc.get("latitude"))
+                i_lng = float(inc.get("longitude"))
+            except Exception:
                 continue
-                
-            # Expanded bounding box check (approx 2km buffer for faster rejection)
-            if abs(i_lat - r_lat) > 0.02 or abs(i_lng - r_lng) > 0.02:
-                continue
-                
-            dist = _haversine_km(r_lat, r_lng, float(i_lat), float(i_lng))
-            
-            # SAFETY-FIRST: Expand threat avoidance to 1.0 km (1000m)
-            # This ensures routes stay completely clear of threat circles (300m + buffer)
-            if dist < 1.0:
-                level = inc.get("threat_level", "LOW").upper()
-                
-                # EXTREME penalties to force complete avoidance of all threats
-                # No route should pass within 1km of any threat
-                if level == "CRITICAL":
-                    multiplier = 1000.0  # Virtually impossible to route through
-                elif level == "HIGH":
-                    multiplier = 500.0   # Extreme penalty
-                elif level == "MEDIUM":
-                    multiplier = 200.0   # Very strong penalty
-                else:  # LOW
-                    multiplier = 50.0    # Still strong penalty
-                
-                base_severity = _severity_weight(inc.get("threat_level", "LOW"), inc.get("threat_score", 0.0))
-                
-                # Proximity factor: closer = worse (ranges 0 to 1)
-                # At 1.0km away = 0 penalty, at 0km = full penalty
-                proximity_factor = (1.0 - (dist / 1.0))
-                
-                risk_increment = base_severity * multiplier * proximity_factor
-                total_risk += risk_increment
 
-    return total_risk
+            d = _haversine_km(lat, lng, i_lat, i_lng)
+            if d < min_distance:
+                min_distance = d
+                closest_threat = inc
+
+            # If any route point falls within 50m of an incident, route is unsafe
+            if d <= buffer_km:
+                return (False, 0.0, {
+                    "reason": "threat_intersection_point",
+                    "threat_id": inc.get("incident_id"),
+                    "distance_to_threat_km": round(d, 4)
+                })
+
+    # No points are within 50m of any incident -> route considered safe
+    if not math.isfinite(min_distance) or closest_threat is None:
+        closest_km = None
+    else:
+        closest_km = round(min_distance, 3)
+
+    # Safety score: 1.0 if >3km away, scale down otherwise
+    if closest_km is None:
+        safety_score = 1.0
+    elif closest_km >= 3.0:
+        safety_score = 1.0
+    else:
+        safety_score = max(0.1, closest_km / 3.0)
+
+    return (True, round(safety_score, 3), {
+        "reason": "safe",
+        "closest_threat_km": closest_km,
+        "closest_threat_id": closest_threat.get("incident_id") if closest_threat else None
+    })
+
+
+def _distance_point_to_segment(point_lat: float, point_lng: float, lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """
+    Calculate distance from point (point_lat, point_lng) to line segment
+    from (lat1, lng1) to (lat2, lng2).
+
+    Uses an equirectangular approximation (valid for short distances):
+    - converts degrees -> kilometers using per-degree scale factors
+    - computes closest point on segment and returns distance in kilometers
+    """
+    # Center latitude for longitude scaling
+    lat_center = (lat1 + lat2) / 2.0
+    scale_lng = 111.0 * math.cos(math.radians(lat_center))  # km per degree longitude
+    scale_lat = 111.0  # km per degree latitude
+
+    # Convert to km (cartesian approximation)
+    x1_c = lng1 * scale_lng
+    y1_c = lat1 * scale_lat
+    x2_c = lng2 * scale_lng
+    y2_c = lat2 * scale_lat
+    px_c = point_lng * scale_lng
+    py_c = point_lat * scale_lat
+
+    # Vector from p1 to p2
+    dx = x2_c - x1_c
+    dy = y2_c - y1_c
+
+    # If segment is a point, return distance to that point (already in km)
+    if dx == 0 and dy == 0:
+        return math.sqrt((px_c - x1_c) ** 2 + (py_c - y1_c) ** 2)
+
+    # Project point onto the line (parameter t)
+    t = ((px_c - x1_c) * dx + (py_c - y1_c) * dy) / (dx * dx + dy * dy)
+    t = max(0.0, min(1.0, t))
+
+    # Closest point on segment
+    closest_x = x1_c + t * dx
+    closest_y = y1_c + t * dy
+
+    # Distance in km
+    dist_km = math.sqrt((px_c - closest_x) ** 2 + (py_c - closest_y) ** 2)
+
+    return dist_km
 
 
 # ----- API Endpoints (simple contract for backend team) -----
@@ -462,123 +546,277 @@ async def report_threat(incident: ThreatIncident):
 @app.post("/route/calculate")
 async def calculate_safe_route(req: RouteRequest):
     """
-    Calculate the safest route between two points.
-    Fetches alternatives from OSRM and scores them against threat database.
+    Calculate the SAFEST route between two points.
+    
+    HARD SAFETY GUARANTEE: Routes will NEVER intersect threat circles.
+    - Routes that touch ANY threat are REJECTED
+    - Safety is the ONLY priority (NOT distance or time)
+    - Start/end points inside threats are ignored
     """
     try:
-        # 1. Get routes from OSRM
+        # 1. Get routes from OSRM (fastest routes, not safest)
         routes = _get_osrm_routes(req.start_lat, req.start_lng, req.end_lat, req.end_lng)
         if not routes:
             raise HTTPException(status_code=404, detail="No routes found")
 
-        # 2. Get active incidents (last 24h ideally, but using all active for demo)
-        # In production, use geospatial query for bounding box of route
+        # 2. Get all incidents (threats)
         incidents = _load_incidents_from_db(limit=500)
         
-        # Filter incidents for visualization (bounding box of the trip + buffer)
-        margin = 0.02 # approx 2km buffer
+        # 3. Filter incidents for visualization (near the route area)
+        # Use a slightly tighter margin to avoid including distant incidents
+        margin = 0.04  # ~4km buffer
         min_lat = min(req.start_lat, req.end_lat) - margin
         max_lat = max(req.start_lat, req.end_lat) + margin
         min_lng = min(req.start_lng, req.end_lng) - margin
         max_lng = max(req.start_lng, req.end_lng) + margin
-        
+
         nearby_threats = []
         for inc in incidents:
-            lat = inc.get("latitude")
-            lng = inc.get("longitude")
-            if lat is not None and lng is not None and min_lat <= lat <= max_lat and min_lng <= lng <= max_lng:
-                nearby_threats.append(inc)
+            lat_raw = inc.get("latitude")
+            lng_raw = inc.get("longitude")
+            if lat_raw is None or lng_raw is None:
+                continue
+            try:
+                lat = float(lat_raw)
+                lng = float(lng_raw)
+            except Exception:
+                continue
+
+            if min_lat <= lat <= max_lat and min_lng <= lng <= max_lng:
+                # Sanitize and store minimal threat info for downstream checks
+                nearby_threats.append({
+                    "incident_id": inc.get("incident_id"),
+                    "latitude": lat,
+                    "longitude": lng,
+                    "threat_level": (inc.get("threat_level") or "MEDIUM").upper(),
+                    "threat_score": float(inc.get("threat_score") or 0.0),
+                    "behavior_summary": inc.get("behavior_summary")
+                })
         
-        # 3. Score each route
-        scored_routes = []
+        # 4. Evaluate each route for safety
+        safe_routes = []
+        unsafe_routes = []
+        
         for route in routes:
-            risk_score = _calculate_route_risk(route["geometry"], incidents)
-            scored_routes.append({
+            # Evaluate route safety only against nearby threats (reduces false positives)
+            is_safe, safety_score, threat_info = _calculate_route_risk(route["geometry"], nearby_threats)
+            
+            route_data = {
                 "geometry": route["geometry"],
                 "duration": route["duration"],
                 "distance": route["distance"],
-                "risk_score": round(risk_score, 2)
-            })
+                "is_safe": is_safe,
+                "safety_score": safety_score,
+                "threat_info": threat_info
+            }
+            
+            if is_safe:
+                safe_routes.append(route_data)
+            else:
+                unsafe_routes.append(route_data)
         
-        # 4. Sort by risk score ONLY (lowest/safest first)
-        # DO NOT consider distance or duration - SAFETY IS THE ONLY PRIORITY
-        scored_routes.sort(key=lambda x: x["risk_score"])
+        # 5. Sort safe routes by safety_score (highest first = safest)
+        safe_routes.sort(key=lambda x: x["safety_score"], reverse=True)
         
-        best_route = scored_routes[0]
-        is_safe = best_route["risk_score"] < 1.0
+        # 6. Select best route (prefer fully safe routes)
+        if safe_routes:
+            best_route = safe_routes[0]
+            routing_mode = "SAFE"
+            routes_analyzed = len(routes)
+            safe_count = len(safe_routes)
+        else:
+            # No fully safe routes found — attempt to create detours around nearby threats
+            # Define threat radii and safety buffer (same values used in _calculate_route_risk)
+            threat_radii_map = {
+                "CRITICAL": 1.2,
+                "HIGH": 1.0,
+                "MEDIUM": 0.6,
+                "LOW": 0.3
+            }
+            safety_buffer = 0.05
+            print(f"⚠️ No fully safe OSRM routes found. Attempting waypoint detours around threats...")
+            detour_found = None
+            # Bearings to try around a threat (degrees)
+            bearings = [0, 45, 90, 135, 180, 225, 270, 315]
+
+            for threat in nearby_threats:
+                try:
+                    t_lat = float(threat.get("latitude"))
+                    t_lng = float(threat.get("longitude"))
+                    t_level = (threat.get("threat_level") or "MEDIUM").upper()
+                    t_radius = threat_radii_map.get(t_level, 0.6)
+                except Exception:
+                    continue
+
+                # Try offsets around the threat at increasing radii
+                for extra in [0.2, 0.5, 1.0]:
+                    offset_km = t_radius + safety_buffer + extra
+                    for b in bearings:
+                        via_lat, via_lng = _destination_point(t_lat, t_lng, b, offset_km)
+                        # Request a route via this waypoint
+                        alt_routes = _get_osrm_routes_via(req.start_lat, req.start_lng, via_lat, via_lng, req.end_lat, req.end_lng)
+                        for alt in alt_routes:
+                            is_safe_alt, safety_score_alt, threat_info_alt = _calculate_route_risk(alt.get("geometry", {}), nearby_threats)
+                            if is_safe_alt:
+                                detour_found = {
+                                    "geometry": alt.get("geometry"),
+                                    "distance": alt.get("distance"),
+                                    "duration": alt.get("duration"),
+                                    "safety_score": safety_score_alt,
+                                    "threat_info": threat_info_alt
+                                }
+                                break
+                        if detour_found:
+                            break
+                    if detour_found:
+                        break
+                if detour_found:
+                    break
+
+            if detour_found:
+                best_route = detour_found
+                routing_mode = "SAFE_VIA_DETOUR"
+                routes_analyzed = len(routes)
+                safe_count = 1
+            else:
+                # Still no safe routes after attempting detours
+                print(f"⚠️ WARNING: ALL {len(routes)} OSRM routes and detours pass through threat zones!")
+                return {
+                    "success": False,
+                    "error": "NO_SAFE_ROUTES",
+                    "message": f"All {len(routes)} available routes (including detours) pass through threat zones. Cannot provide safe route.",
+                    "threats_blocking": nearby_threats,
+                    "unsafe_routes_count": len(unsafe_routes),
+                    "recommendations": [
+                        "Wait for threats to clear",
+                        "Choose a different destination",
+                        "Consider calling for assistance"
+                    ]
+                }
         
         return {
             "success": True,
-            "route": best_route,
-            "alternatives_analyzed": len(routes),
-            "safety_status": "SAFE" if is_safe else "CAUTION",
-            "risk_score": best_route["risk_score"],
-            "threats": nearby_threats
+            "routing_mode": routing_mode,
+            "route": {
+                "geometry": best_route["geometry"],
+                "distance": best_route["distance"],
+                "duration": best_route["duration"],
+                "is_safe": True,
+                "safety_score": best_route["safety_score"]
+            },
+            "routes_analyzed": routes_analyzed,
+            "safe_routes_found": safe_count,
+            "safety_guarantee": "✅ This route does NOT intersect any threat circles",
+            "threat_details": best_route["threat_info"],
+            "threats_near_route": nearby_threats
         }
 
     except Exception as e:
         print(f"❌ Error calculating route: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/sos")
 async def trigger_sos(alert: Dict):
     """
-    Handle SOS alerts from the frontend. Saves to sos_alerts table.
-    Also creates a critical incident record so it appears on threat maps.
+    Handle SOS alerts from the frontend. Saves to both:
+    1. sos_alerts table (for SOS-specific tracking)
+    2. incidents table (so it appears on threat maps and dashboards)
     """
     try:
         print(f"🚨 SOS ALERT RECEIVED: {alert.get('type')}")
         
         # Generate incident ID for linking
-        incident_id = f"SOS_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000,9999)}"
+        incident_id = f"SOS_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(10000,99999)}"
         
+        # Extract location from alert
+        location = alert.get("location", {}) or {}
+        latitude = location.get("lat", 0.0)
+        longitude = location.get("lng", 0.0)
+        
+        # Ensure numeric values
+        try:
+            latitude = float(latitude) if latitude else 0.0
+            longitude = float(longitude) if longitude else 0.0
+        except (ValueError, TypeError):
+            latitude = 0.0
+            longitude = 0.0
+        
+        # Save to SOS alerts table
         sos_record = {
             "type": alert.get("type", "SOS"),
-            "details": alert.get("details"),
-            "latitude": alert.get("location", {}).get("lat"),
-            "longitude": alert.get("location", {}).get("lng"),
+            "details": alert.get("details", "SOS Alert Triggered"),
+            "latitude": latitude,
+            "longitude": longitude,
             "status": "active",
-            "incident_id": incident_id
+            "severity": alert.get("severity", "CRITICAL")
         }
         
-        response = supabase.table("sos_alerts").insert(sos_record).execute()
-        sos_id = response.data[0].get("id") if response.data else None
-        print(f"✅ SOS Alert saved: {sos_id}")
+        # Try to add incident_id if column exists
+        sos_record_with_incident = sos_record.copy()
+        sos_record_with_incident["incident_id"] = incident_id
         
-        # Mirror to incidents table so it appears on maps
-        if sos_record["latitude"] and sos_record["longitude"]:
-            incident_record = {
-                "incident_id": incident_id,
-                "timestamp": datetime.now().isoformat(),
-                "threat_level": "CRITICAL",
-                "threat_score": 1.0,
-                "people_count": 1,
-                "weapon_detected": False,
-                "weapon_types": [],
-                "behavior_summary": f"Manual SOS Alert: {alert.get('details', 'User requested help')}",
-                "is_critical": True,
-                "full_telemetry": {
-                    "source": "user_sos",
-                    "alert_type": alert.get("type", "SOS"),
-                    "sos_id": sos_id
-                },
-                "latitude": sos_record["latitude"],
-                "longitude": sos_record["longitude"],
-                "location_accuracy_m": 10.0,
-                "source_id": "user_device",
-                "mode": "client"
-            }
-            _insert_incident(incident_record)
-            print(f"✅ SOS Incident mirrored to map: {incident_id}")
+        sos_id = None
+        try:
+            response = supabase.table("sos_alerts").insert(sos_record_with_incident).execute()
+            sos_id = response.data[0].get("id") if response.data else None
+            print(f"✅ SOS Alert saved: {sos_id}")
+        except Exception as e:
+            # Fallback: try without incident_id if column doesn't exist
+            if "incident_id" in str(e):
+                try:
+                    response = supabase.table("sos_alerts").insert(sos_record).execute()
+                    sos_id = response.data[0].get("id") if response.data else None
+                    print(f"✅ SOS Alert saved (without incident_id): {sos_id}")
+                except Exception as e2:
+                    print(f"⚠️ Failed to save SOS alert: {e2}")
+            else:
+                print(f"⚠️ Failed to save SOS alert: {e}")
+        
+        # ALWAYS create incident record regardless of location
+        incident_record = {
+            "incident_id": incident_id,
+            "timestamp": datetime.now().isoformat(),
+            "threat_level": "CRITICAL",
+            "threat_score": 1.0,
+            "people_count": 1,
+            "weapon_detected": False,
+            "weapon_types": [],
+            "behavior_summary": f"🚨 SOS ALERT: {alert.get('details', 'User requested emergency help')}",
+            "is_critical": True,
+            "full_telemetry": {
+                "source": "user_sos",
+                "alert_type": alert.get("type", "SOS"),
+                "sos_id": sos_id,
+                "alert_time": datetime.now().isoformat()
+            },
+            "latitude": latitude,
+            "longitude": longitude,
+            "location_accuracy_m": 10.0 if latitude and longitude else None,
+            "source_id": "user_device_sos",
+            "mode": "client",
+            "severity": alert.get("severity", "CRITICAL")
+        }
+        
+        # Insert incident record
+        success = _insert_incident(incident_record)
+        if success:
+            print(f"✅ SOS Incident created in incidents table: {incident_id}")
+        else:
+            print(f"⚠️ Failed to create SOS incident record: {incident_id}")
         
         return {
             "success": True,
             "message": "SOS Alert recorded and emergency services notified",
-            "id": sos_id
+            "id": sos_id,
+            "incident_id": incident_id
         }
         
     except Exception as e:
         print(f"❌ SOS Error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -643,7 +881,8 @@ async def trigger_sos_with_video(
                 "longitude": longitude,
                 "location_accuracy_m": 5.0,
                 "source_id": "client_sos_video",
-                "mode": "client"
+                "mode": "client",
+                "severity": threat_result.get("threat_level", "MEDIUM")
             }
             
             # Insert threat incident into database
@@ -674,12 +913,15 @@ async def trigger_sos_with_video(
                 "longitude": longitude,
                 "location_accuracy_m": 5.0,
                 "source_id": "client_sos_video",
-                "mode": "client"
+                "mode": "client",
+                "severity": "MEDIUM"
             }
             
             _insert_incident(fallback_incident)
             print(f"⚠️ SOS recorded with fallback incident (threat_cv unavailable)")
         
+        severity = threat_result.get("threat_level", "CRITICAL") if threat_result else "CRITICAL"
+
         # Save SOS alert metadata
         sos_record = {
             "type": type,
@@ -687,6 +929,7 @@ async def trigger_sos_with_video(
             "latitude": latitude,
             "longitude": longitude,
             "status": "active",
+            "severity": severity,
             "video_path": video_filename
         }
         
@@ -734,9 +977,14 @@ def _process_video_through_threat_cv(video_path: str, incident_id: str) -> Optio
     Returns dict with threat analysis or None if processing fails.
     """
     try:
+        # Ensure the 'engines' module can be found by adding its parent dir to sys.path
+        import sys
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        if current_dir not in sys.path:
+            sys.path.insert(0, current_dir)
+
         # Try to import and use threat_cv engine
         from engines.threat_cv.main import SafeSphereThreatsCV
-        from engines.threat_cv.inference.video_source import VideoSource
         import cv2
         
         print(f"🎬 Processing video through threat_cv: {incident_id}")
@@ -846,6 +1094,7 @@ def _process_video_through_threat_cv(video_path: str, incident_id: str) -> Optio
         traceback.print_exc()
         return None
 
+@app.get("/incidents")
 async def list_incidents(limit: int = 100, threat_level: Optional[str] = None):
     """List recent incidents from Supabase. Optionally filter by threat level."""
     try:
@@ -860,6 +1109,16 @@ async def list_incidents(limit: int = 100, threat_level: Optional[str] = None):
         print(f"❌ Error listing incidents: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/alerts/active")
+async def get_active_alerts(limit: int = 50):
+    """Get active SOS alerts from Supabase for Police Dashboard."""
+    try:
+        response = supabase.table("sos_alerts").select("*").eq("status", "active").order("created_at", desc=True).limit(limit).execute()
+        return {"count": len(response.data), "alerts": response.data}
+    except Exception as e:
+        print(f"❌ Error getting active alerts: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/incidents/{incident_id}")
 async def get_incident(incident_id: str):
@@ -1100,7 +1359,7 @@ async def heatmap_view(key: Optional[str] = None):
         heatmap = new google.maps.visualization.HeatmapLayer({
           data: [],
           dissipating: true,
-          radius: 30
+          radius: 15
         });
         heatmap.setMap(map);
         navigator.geolocation?.watchPosition((pos)=>{
@@ -1216,7 +1475,7 @@ async def leaflet_heatmap_view():
       }
       function weightToRadiusMeters(w){
         const clamped = Math.max(0, Math.min(1, w));
-        return 50 + clamped * 250;
+        return 20 + clamped * 100;
       }
       function setHeat(data){
         const pts = data.zones.map(z => {

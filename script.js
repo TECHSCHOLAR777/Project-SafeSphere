@@ -41,6 +41,25 @@ style.textContent = `
             opacity: 0;
         }
     }
+    /* Police Map Styles */
+    .live-map-police {
+        height: 450px;
+        width: 100%;
+        border-radius: 16px;
+        overflow: hidden;
+        background: #2d3748;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+    .live-map-police .map-container {
+        height: 100%;
+        width: 100%;
+    }
+    /* Police Map Marker Styles */
+    .incident-marker { border-radius: 50%; border: 2px solid rgba(255,255,255,0.8); box-shadow: 0 2px 8px rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; font-weight: bold; color: white; font-size: 14px; text-shadow: 1px 1px 2px rgba(0,0,0,0.5); }
+    .incident-marker.critical { background-color: #ef4444; }
+    .incident-marker.high { background-color: #f97316; }
+    .incident-marker.medium { background-color: #f59e0b; }
+    .incident-marker.low { background-color: #10b981; }
     /* Guardian Map Marker Styles */
     .location-pin-guardian {
         position: relative;
@@ -1196,6 +1215,7 @@ try {
                         });
                         
                         const routeData = await apiRes.json();
+                        console.log('Route API response:', apiRes.status, routeData);
 
                         if (routeData.success && routeData.route) {
                             if (routeLayer) map.removeLayer(routeLayer);
@@ -1204,9 +1224,12 @@ try {
                             // Draw route
                             const coords = routeData.route.geometry.coordinates.map(c => [c[1], c[0]]); // GeoJSON is lng,lat -> Leaflet lat,lng
                             
-                            // Color based on risk
-                            // Adjusted for new high penalties (>50 is likely a high threat)
-                            const color = routeData.risk_score > 50 ? '#ef4444' : (routeData.risk_score > 1 ? '#f59e0b' : '#10b981');
+                            // Determine safety score (backend uses `safety_score` 0.0-1.0)
+                            const safetyScore = (routeData.route && routeData.route.safety_score) || routeData.safety_score || 1.0;
+                            // Color: green (safe), amber (moderate), red (danger)
+                            let color = '#10b981';
+                            if (safetyScore < 0.4) color = '#ef4444';
+                            else if (safetyScore < 0.7) color = '#f59e0b';
                             
                             routeLayer = L.polyline(coords, {
                                 color: color,
@@ -1215,40 +1238,53 @@ try {
                                 lineCap: 'round'
                             }).addTo(map);
 
-                            // Draw threats
-                            if (routeData.threats && routeData.threats.length > 0) {
-                                routeData.threats.forEach(threat => {
+                            // Draw threats (backend may return `threats`, `threats_near_route`, or `threat_details`)
+                            const threats = routeData.threats || routeData.threats_near_route || (routeData.threat_details ? (Array.isArray(routeData.threat_details) ? routeData.threat_details : [routeData.threat_details]) : []);
+                            if (threats && threats.length > 0) {
+                                threats.forEach(threat => {
                                     const tLat = threat.latitude;
                                     const tLng = threat.longitude;
-                                    const level = threat.threat_level || 'MEDIUM';
-                                    
+                                    const level = (threat.threat_level || threat.threatLevel || 'MEDIUM').toUpperCase();
                                     let tColor = '#f59e0b';
                                     if (level === 'HIGH' || level === 'CRITICAL') tColor = '#ef4444';
-                                    
+                                    const radiusKm = threat.radius_km || threat.radiusKm || 0.8;
                                     L.circle([tLat, tLng], {
                                         color: tColor,
                                         fillColor: tColor,
-                                        fillOpacity: 0.3,
-                                        radius: 300,
+                                        fillOpacity: 0.18,
+                                        radius: (radiusKm * 1000),
                                         weight: 1
                                     }).addTo(threatLayer).bindPopup(`
                                         <strong>${level} THREAT</strong><br>
-                                        ${threat.behavior_summary || 'Suspicious activity'}
+                                        ${threat.behavior_summary || threat.summary || 'Suspicious activity'}
                                     `);
                                 });
                             }
 
                             // Update UI
-                            badge.textContent = routeData.safety_status;
+                            badge.textContent = routeData.routing_mode || 'SAFE';
                             badge.style.background = color;
                             msg.innerHTML = `
                                 <strong>Best Route Found</strong><br>
-                                Risk Score: ${routeData.risk_score}<br>
-                                Analyzed ${routeData.alternatives_analyzed} alternatives.<br>
-                                Avoiding high-threat zones.
+                                Safety Score: ${Math.round((safetyScore || 0) * 100)}%<br>
+                                Analyzed ${routeData.routes_analyzed || routeData.alternatives_analyzed || 1} alternatives.<br>
+                                Avoiding identified threat zones.
                             `;
                         } else {
+                            // Log detailed backend response for debugging
+                            console.warn('Safe route not available:', routeData);
+                            // If backend provided an error payload, log specifics
+                            if (routeData && routeData.error) {
+                                console.error('Route calculation error:', routeData.error, routeData.message || '', routeData.threats_blocking || routeData.threats_near_route || routeData.threat_details || null);
+                            } else if (routeData && routeData.threats_blocking) {
+                                console.info('Threats blocking routes:', routeData.threats_blocking);
+                            }
+
                             msg.textContent = 'Could not calculate a safe route.';
+                            // Optionally show recommendation if backend provided it
+                            if (routeData && routeData.recommendations && Array.isArray(routeData.recommendations)) {
+                                msg.innerHTML += '<br><small>' + routeData.recommendations.join(' · ') + '</small>';
+                            }
                         }
 
                     } catch (error) {
@@ -1316,7 +1352,7 @@ try {
                                 const colorIndex = Math.floor(intensity * (colors.length - 1));
                                 
                                 L.circle([zone.lat, zone.lng], {
-                                    radius: 300 + (intensity * 500),
+                                    radius: 100 + (intensity * 200),
                                     fillColor: colors[colorIndex],
                                     color: colors[colorIndex],
                                     weight: 1,
@@ -1564,38 +1600,39 @@ try {
 
     // POLICE DASHBOARD
     const PolicePage = {
-        init(params = {}) {
+        async init(params = {}) {
             const app = document.getElementById('app');
             
-            const activeAlerts = [
-                {
-                    id: 1,
-                    type: 'SOS Emergency',
-                    location: 'Central Park, Near Boat House, NY',
-                    time: 'Just now',
-                    details: 'Panic button activated by user. Location tracking enabled. Ambient audio recording started.',
-                    priority: 'High',
-                    status: 'Active'
-                },
-                {
-                    id: 2,
-                    type: 'Voice Distress',
-                    location: '5th Avenue & 42nd St',
-                    time: '3 mins ago',
-                    details: 'High-decibel scream detected followed by "Help". AI confidence score: 98%.',
-                    priority: 'Critical',
-                    status: 'Dispatching'
-                },
-                {
-                    id: 3,
-                    type: 'Route Deviation',
-                    location: 'Broadway & W 34th St',
-                    time: '12 mins ago',
-                    details: 'User vehicle deviated from safe corridor by 500m. No response to check-in notification.',
-                    priority: 'Medium',
-                    status: 'Monitoring'
-                },
-            ];
+            let activeAlerts = [];
+            try {
+                const response = await fetch(`${ML_API_URL}/alerts/active`);
+                const data = await response.json();
+                if (data.alerts) {
+                    activeAlerts = data.alerts.map(alert => ({
+                        id: alert.id,
+                        type: alert.type || 'SOS Emergency',
+                        location: alert.latitude && alert.longitude ? `${alert.latitude.toFixed(4)}, ${alert.longitude.toFixed(4)}` : 'Unknown Location',
+                        time: new Date(alert.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
+                        details: alert.details || 'No details provided',
+                        priority: alert.severity || 'CRITICAL',
+                        status: alert.status || 'Active'
+                    }));
+                }
+            } catch (error) {
+                console.error('Failed to fetch active alerts:', error);
+                // Fallback data for demo if fetch fails
+                activeAlerts = [
+                    {
+                        id: 1,
+                        type: 'SOS Emergency',
+                        location: 'Central Park, Near Boat House, NY',
+                        time: 'Just now',
+                        details: 'Panic button activated by user. Location tracking enabled. Ambient audio recording started.',
+                        priority: 'High',
+                        status: 'Active'
+                    }
+                ];
+            }
 
             const recentLogs = [
                 { id: 101, type: 'SOS Alert', location: 'Broadway St', time: '10:42 AM', details: 'User reported feeling unsafe. Patrol unit #42 responded.', status: 'Resolved' },
@@ -1679,23 +1716,8 @@ try {
                             <!-- Left: Map & Alerts -->
                             <div class="police-main-feed">
                                 <!-- Live Map -->
-                                <section class="live-map">
-                                    <div class="map-container">
-                                        <div class="map-grid"></div>
-                                        <div class="map-placeholder">
-                                            <div class="map-icon">📍</div>
-                                            <p class="map-title">Live City Map Visualization</p>
-                                            <p class="map-subtitle">Connecting to GIS Satellite Feed...</p>
-                                        </div>
-                                        <div class="map-header-badge">
-                                            <span class="map-dot"></span>
-                                            Manhattan Sector
-                                        </div>
-                                        <div class="map-controls">
-                                            <button class="map-btn">+</button>
-                                            <button class="map-btn">−</button>
-                                        </div>
-                                    </div>
+                                <section class="live-map-police">
+                                    <div id="police-live-map" class="map-container"></div>
                                 </section>
 
                                 <!-- Active Alerts -->
@@ -1800,9 +1822,466 @@ try {
 
             const quickActionButtons = app.querySelectorAll('.quick-action-btn');
             quickActionButtons.forEach(btn => {
-                btn.addEventListener('click', () => {
-                    Toast.show('⚡ Action triggered', 'info');
+                btn.addEventListener('click', (e) => {
+                    // Find the specific button - look for "Generate Report" text or qa-blue class
+                    if (btn.classList.contains('qa-blue') || btn.textContent.includes('Generate Report')) {
+                        PolicePage.openGenerateReportModal();
+                    } else {
+                        Toast.show('⚡ Action triggered', 'info');
+                    }
                 });
+            });
+
+            // Initialize the map
+            this.initPoliceMap();
+        },
+
+        async initPoliceMap() {
+            const mapContainer = document.getElementById('police-live-map');
+            if (!mapContainer) {
+                console.error('Police map container not found');
+                return;
+            }
+
+            // Default center for the map
+            const centerLat = 28.7128;
+            const centerLng = 77.0060;
+
+            const map = L.map(mapContainer, {
+                zoomControl: false,
+                attributionControl: false,
+                preferCanvas: true
+            }).setView([centerLat, centerLng], 12);
+
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+                maxZoom: 20
+            }).addTo(map);
+
+            // Fetch ALL incidents (not just nearby)
+            try {
+                const response = await fetch(`${ML_API_URL}/incidents?limit=500`);
+                const data = await response.json();
+
+                if (data.incidents && data.incidents.length > 0) {
+                    // Create feature group to auto-fit bounds
+                    const featureGroup = L.featureGroup();
+
+                    data.incidents.forEach(incident => {
+                        if (incident.latitude && incident.longitude) {
+                            const level = (incident.threat_level || 'low').toLowerCase();
+                            const iconHtml = `<div class="incident-marker ${level}">${level.charAt(0).toUpperCase()}</div>`;
+                            
+                            const customIcon = L.divIcon({
+                                className: 'custom-map-icon',
+                                html: iconHtml,
+                                iconSize: [30, 30],
+                                iconAnchor: [15, 15]
+                            });
+
+                            const marker = L.marker([incident.latitude, incident.longitude], { icon: customIcon })
+                                .bindPopup(`<b>${incident.threat_level} Threat</b><br>${incident.behavior_summary || 'No details'}<br><small>ID: ${incident.incident_id}</small>`);
+                            
+                            featureGroup.addLayer(marker);
+                        }
+                    });
+
+                    // Add feature group to map
+                    featureGroup.addTo(map);
+
+                    // Auto-fit map to show all incidents
+                    if (featureGroup.getLayers().length > 0) {
+                        map.fitBounds(featureGroup.getBounds().pad(0.1));
+                    }
+
+                    Toast.show(`📍 Loaded ${data.incidents.length} incidents on the map.`, 'success');
+                } else {
+                    Toast.show('No incidents in the system.', 'info');
+                }
+            } catch (error) {
+                console.error('Failed to load incidents for police map:', error);
+                Toast.show('Could not load incident data.', 'error');
+            }
+        },
+
+        openGenerateReportModal() {
+            Toast.show('📋 Opening incident report form...', 'info');
+            
+            const modal = document.createElement('div');
+            modal.className = 'incident-report-modal active';
+            modal.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0,0,0,0.95);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                z-index: 3000;
+                animation: fadeIn 300ms ease-out;
+                overflow-y: auto;
+            `;
+
+            modal.innerHTML = `
+                <div style="
+                    background: white;
+                    border-radius: 16px;
+                    padding: 30px;
+                    max-width: 700px;
+                    width: 90%;
+                    margin: 20px auto;
+                    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                    animation: slideUp 300ms ease-out;
+                ">
+                    <!-- Header -->
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; border-bottom: 2px solid #e5e7eb; padding-bottom: 16px;">
+                        <h2 style="margin: 0; color: #1f2937; font-size: 24px;">📋 Generate Incident Report</h2>
+                        <button class="incident-close-btn" style="
+                            background: none;
+                            border: none;
+                            font-size: 28px;
+                            cursor: pointer;
+                            color: #666;
+                            padding: 0;
+                        ">✕</button>
+                    </div>
+
+                    <!-- Form -->
+                    <form id="incident-report-form" style="display: flex; flex-direction: column; gap: 16px;">
+                        
+                        <!-- Row 1: Threat Level & Score -->
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                            <div>
+                                <label style="display: block; font-weight: 600; margin-bottom: 6px; color: #1f2937;">Threat Level *</label>
+                                <select name="threat_level" required style="
+                                    width: 100%;
+                                    padding: 10px;
+                                    border: 1px solid #d1d5db;
+                                    border-radius: 6px;
+                                    font-size: 14px;
+                                    background: white;
+                                    cursor: pointer;
+                                ">
+                                    <option value="">Select threat level</option>
+                                    <option value="LOW">LOW</option>
+                                    <option value="MEDIUM">MEDIUM</option>
+                                    <option value="HIGH">HIGH</option>
+                                    <option value="CRITICAL">CRITICAL</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label style="display: block; font-weight: 600; margin-bottom: 6px; color: #1f2937;">Threat Score (0-1) *</label>
+                                <input type="number" name="threat_score" min="0" max="1" step="0.01" required placeholder="0.5" style="
+                                    width: 100%;
+                                    padding: 10px;
+                                    border: 1px solid #d1d5db;
+                                    border-radius: 6px;
+                                    font-size: 14px;
+                                    box-sizing: border-box;
+                                " />
+                            </div>
+                        </div>
+
+                        <!-- Row 2: Location -->
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                            <div>
+                                <label style="display: block; font-weight: 600; margin-bottom: 6px; color: #1f2937;">Latitude *</label>
+                                <input type="number" name="latitude" step="0.0001" required placeholder="28.7128" style="
+                                    width: 100%;
+                                    padding: 10px;
+                                    border: 1px solid #d1d5db;
+                                    border-radius: 6px;
+                                    font-size: 14px;
+                                    box-sizing: border-box;
+                                " />
+                            </div>
+                            <div>
+                                <label style="display: block; font-weight: 600; margin-bottom: 6px; color: #1f2937;">Longitude *</label>
+                                <input type="number" name="longitude" step="0.0001" required placeholder="77.0060" style="
+                                    width: 100%;
+                                    padding: 10px;
+                                    border: 1px solid #d1d5db;
+                                    border-radius: 6px;
+                                    font-size: 14px;
+                                    box-sizing: border-box;
+                                " />
+                            </div>
+                        </div>
+
+                        <!-- Row 3: People & Weapons -->
+                        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px;">
+                            <div>
+                                <label style="display: block; font-weight: 600; margin-bottom: 6px; color: #1f2937;">People Count</label>
+                                <input type="number" name="people_count" min="0" placeholder="0" style="
+                                    width: 100%;
+                                    padding: 10px;
+                                    border: 1px solid #d1d5db;
+                                    border-radius: 6px;
+                                    font-size: 14px;
+                                    box-sizing: border-box;
+                                " />
+                            </div>
+                            <div>
+                                <label style="display: block; font-weight: 600; margin-bottom: 6px; color: #1f2937;">Weapon Detected</label>
+                                <select name="weapon_detected" style="
+                                    width: 100%;
+                                    padding: 10px;
+                                    border: 1px solid #d1d5db;
+                                    border-radius: 6px;
+                                    font-size: 14px;
+                                    background: white;
+                                    cursor: pointer;
+                                ">
+                                    <option value="false">No</option>
+                                    <option value="true">Yes</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label style="display: block; font-weight: 600; margin-bottom: 6px; color: #1f2937;">Is Critical</label>
+                                <select name="is_critical" style="
+                                    width: 100%;
+                                    padding: 10px;
+                                    border: 1px solid #d1d5db;
+                                    border-radius: 6px;
+                                    font-size: 14px;
+                                    background: white;
+                                    cursor: pointer;
+                                ">
+                                    <option value="false">No</option>
+                                    <option value="true">Yes</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Row 4: Weapon Types -->
+                        <div>
+                            <label style="display: block; font-weight: 600; margin-bottom: 6px; color: #1f2937;">Weapon Types (if applicable)</label>
+                            <input type="text" name="weapon_types" placeholder="e.g., Gun, Knife, Explosives" style="
+                                width: 100%;
+                                padding: 10px;
+                                border: 1px solid #d1d5db;
+                                border-radius: 6px;
+                                font-size: 14px;
+                                box-sizing: border-box;
+                            " />
+                        </div>
+
+                        <!-- Row 5: Behavior Summary -->
+                        <div>
+                            <label style="display: block; font-weight: 600; margin-bottom: 6px; color: #1f2937;">Behavior Summary *</label>
+                            <textarea name="behavior_summary" required placeholder="Describe the incident, suspicious behavior, or threat..." style="
+                                width: 100%;
+                                padding: 10px;
+                                border: 1px solid #d1d5db;
+                                border-radius: 6px;
+                                font-size: 14px;
+                                box-sizing: border-box;
+                                min-height: 100px;
+                                resize: vertical;
+                            "></textarea>
+                        </div>
+
+                        <!-- Row 6: Source & Mode -->
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                            <div>
+                                <label style="display: block; font-weight: 600; margin-bottom: 6px; color: #1f2937;">Source ID</label>
+                                <input type="text" name="source_id" placeholder="e.g., Officer Name or ID" style="
+                                    width: 100%;
+                                    padding: 10px;
+                                    border: 1px solid #d1d5db;
+                                    border-radius: 6px;
+                                    font-size: 14px;
+                                    box-sizing: border-box;
+                                " />
+                            </div>
+                            <div>
+                                <label style="display: block; font-weight: 600; margin-bottom: 6px; color: #1f2937;">Mode (Detection Method)</label>
+                                <select name="mode" style="
+                                    width: 100%;
+                                    padding: 10px;
+                                    border: 1px solid #d1d5db;
+                                    border-radius: 6px;
+                                    font-size: 14px;
+                                    background: white;
+                                    cursor: pointer;
+                                ">
+                                    <option value="">Select mode</option>
+                                    <option value="MANUAL_REPORT">Manual Report</option>
+                                    <option value="SOS">SOS Alert</option>
+                                    <option value="VIDEO_ANALYSIS">Video Analysis</option>
+                                    <option value="PATROL_OBSERVATION">Patrol Observation</option>
+                                    <option value="CITIZEN_REPORT">Citizen Report</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Row 7: Severity -->
+                        <div>
+                            <label style="display: block; font-weight: 600; margin-bottom: 6px; color: #1f2937;">Severity</label>
+                            <select name="severity" style="
+                                width: 100%;
+                                padding: 10px;
+                                border: 1px solid #d1d5db;
+                                border-radius: 6px;
+                                font-size: 14px;
+                                background: white;
+                                cursor: pointer;
+                            ">
+                                <option value="">Select severity</option>
+                                <option value="Low">Low</option>
+                                <option value="Medium">Medium</option>
+                                <option value="High">High</option>
+                                <option value="Critical">Critical</option>
+                            </select>
+                        </div>
+
+                        <!-- Row 8: Location Accuracy -->
+                        <div>
+                            <label style="display: block; font-weight: 600; margin-bottom: 6px; color: #1f2937;">Location Accuracy (meters)</label>
+                            <input type="number" name="location_accuracy_m" min="0" placeholder="50" style="
+                                width: 100%;
+                                padding: 10px;
+                                border: 1px solid #d1d5db;
+                                border-radius: 6px;
+                                font-size: 14px;
+                                box-sizing: border-box;
+                            " />
+                        </div>
+
+                        <!-- Submit & Cancel -->
+                        <div style="display: flex; gap: 12px; margin-top: 20px; border-top: 1px solid #e5e7eb; padding-top: 20px;">
+                            <button type="submit" style="
+                                flex: 1;
+                                background: #0ea5e9;
+                                color: white;
+                                border: none;
+                                padding: 12px;
+                                border-radius: 8px;
+                                font-size: 16px;
+                                font-weight: 600;
+                                cursor: pointer;
+                                transition: all 200ms;
+                            ">✅ Submit Report</button>
+                            <button type="button" id="cancel-report-btn" style="
+                                flex: 1;
+                                background: #e5e7eb;
+                                color: #666;
+                                border: none;
+                                padding: 12px;
+                                border-radius: 8px;
+                                font-size: 16px;
+                                cursor: pointer;
+                                transition: all 200ms;
+                            ">Cancel</button>
+                        </div>
+                    </form>
+                </div>
+            `;
+
+            document.body.appendChild(modal);
+
+            // Get form and buttons
+            const form = modal.querySelector('#incident-report-form');
+            const closeBtn = modal.querySelector('.incident-close-btn');
+            const cancelBtn = modal.querySelector('#cancel-report-btn');
+
+            // Close modal handler
+            const closeModal = () => {
+                modal.classList.remove('active');
+                setTimeout(() => modal.remove(), 300);
+            };
+
+            // Form submission
+            form.addEventListener('submit', async (e) => {
+                e.preventDefault();
+
+                // Collect form data
+                const formData = new FormData(form);
+                
+                // Generate incident_id if not provided
+                const incidentId = `INC_${new Date().toISOString().replace(/[:\-T.Z]/g, '').slice(0, 14)}_${Math.floor(Math.random() * 10000)}`;
+                
+                // Get weapon types and convert to array
+                const weaponTypesStr = formData.get('weapon_types') || '';
+                const weaponTypesArray = weaponTypesStr.trim() ? weaponTypesStr.split(',').map(w => w.trim()).filter(w => w) : [];
+                
+                const incidentData = {
+                    incident_id: incidentId,
+                    timestamp: new Date().toISOString(),
+                    threat_level: formData.get('threat_level'),
+                    threat_score: parseFloat(formData.get('threat_score')),
+                    latitude: parseFloat(formData.get('latitude')),
+                    longitude: parseFloat(formData.get('longitude')),
+                    people_count: formData.get('people_count') ? parseInt(formData.get('people_count')) : 0,
+                    weapon_detected: formData.get('weapon_detected') === 'true',
+                    weapon_types: weaponTypesArray,
+                    behavior_summary: formData.get('behavior_summary'),
+                    is_critical: formData.get('is_critical') === 'true',
+                    full_telemetry: {
+                        source: 'MANUAL_REPORT',
+                        created_by: formData.get('source_id') || 'Officer',
+                        creation_timestamp: new Date().toISOString(),
+                        severity: formData.get('severity') || 'Unknown'
+                    },
+                    source_id: formData.get('source_id') || 'MANUAL_INPUT',
+                    mode: formData.get('mode') || 'MANUAL_REPORT',
+                    location_accuracy_m: formData.get('location_accuracy_m') ? parseFloat(formData.get('location_accuracy_m')) : 50
+                };
+
+                // Validate required fields
+                if (!incidentData.threat_level || !incidentData.behavior_summary || !incidentData.latitude || !incidentData.longitude) {
+                    Toast.show('❌ Please fill in all required fields', 'error');
+                    return;
+                }
+
+                // Submit to backend
+                try {
+                    const submitBtn = form.querySelector('button[type="submit"]');
+                    submitBtn.disabled = true;
+                    submitBtn.textContent = '⏳ Submitting...';
+
+                    const response = await fetch(`${ML_API_URL}/threats/report`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(incidentData)
+                    });
+
+                    const result = await response.json();
+
+                    if (response.ok) {
+                        Toast.show('✅ Incident report submitted successfully!', 'success', 4000);
+                        console.log('Incident created:', result);
+                        closeModal();
+                        
+                        // Refresh map if available
+                        setTimeout(() => {
+                            location.reload();
+                        }, 2000);
+                    } else {
+                        Toast.show(`❌ Error: ${result.detail || 'Failed to submit report'}`, 'error');
+                        submitBtn.disabled = false;
+                        submitBtn.textContent = '✅ Submit Report';
+                    }
+                } catch (error) {
+                    console.error('Error submitting incident report:', error);
+                    Toast.show('❌ Network error: ' + error.message, 'error');
+                    const submitBtn = form.querySelector('button[type="submit"]');
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = '✅ Submit Report';
+                }
+            });
+
+            // Close button handlers
+            closeBtn.addEventListener('click', closeModal);
+            cancelBtn.addEventListener('click', closeModal);
+
+            // Close when clicking outside modal
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) {
+                    closeModal();
+                }
             });
         },
 
