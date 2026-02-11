@@ -93,8 +93,16 @@ CREATE TABLE IF NOT EXISTS public.sos_alerts (
     latitude DECIMAL(10,8),
     longitude DECIMAL(11,8),
     status VARCHAR(20) DEFAULT 'active', -- active, resolved, canceled
+    video_path TEXT, -- Path to the SOS video file, if applicable
+    incident_id VARCHAR(100), -- Link to the incident created from video analysis
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+
+    -- Foreign key to link to the incidents table
+    CONSTRAINT fk_incident
+        FOREIGN KEY(incident_id) 
+        REFERENCES incidents(incident_id)
+        ON DELETE SET NULL
 );
 
 -- Create index for SOS status queries
@@ -104,6 +112,10 @@ ON public.sos_alerts(status);
 -- Create index for SOS location queries
 CREATE INDEX IF NOT EXISTS idx_sos_alerts_location 
 ON public.sos_alerts(latitude, longitude);
+
+-- Create index for linking SOS alerts to incidents
+CREATE INDEX IF NOT EXISTS idx_sos_alerts_incident_id
+ON public.sos_alerts(incident_id);
 
 -- Enable real-time subscriptions (optional)
 ALTER TABLE public.incidents REPLICA IDENTITY FULL;
@@ -595,4 +607,3 @@ In Supabase dashboard:
 - **Python Client**: https://github.com/supabase-community/supabase-py
 - **FastAPI Docs**: https://fastapi.tiangolo.com
 - **PostGIS Queries**: https://postgis.net/docs
-

@@ -41,6 +41,31 @@ style.textContent = `
             opacity: 0;
         }
     }
+    /* Guardian Map Marker Styles */
+    .location-pin-guardian {
+        position: relative;
+        width: 40px;
+        height: 40px;
+    }
+    .location-pin-guardian img {
+        width: 100%;
+        height: 100%;
+        border-radius: 50%;
+        border: 2px solid white;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+    }
+    .ping-animation-guardian {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 40px;
+        height: 40px;
+        background: rgba(99, 102, 241, 0.5);
+        border-radius: 50%;
+        transform: translate(-50%, -50%);
+        animation: guardian-ping 1.5s ease-out infinite;
+    }
+    @keyframes guardian-ping { 0% { transform: translate(-50%, -50%) scale(0.5); opacity: 0.8; } 100% { transform: translate(-50%, -50%) scale(2); opacity: 0; } }
 `;
 document.head.appendChild(style);
 
@@ -283,6 +308,153 @@ class ChatWidget {
 }
 
 // ============================================
+// VIDEO RECORDER - SOS INCIDENT RECORDING
+// ============================================
+
+class VideoRecorder {
+    constructor() {
+        this.mediaRecorder = null;
+        this.recordedChunks = [];
+        this.stream = null;
+        this.isRecording = false;
+        this.recordingStartTime = null;
+        this.recordingDuration = 0;
+    }
+
+    /**
+     * Start video recording from device camera
+     * @returns {Promise<boolean>} True if recording started successfully
+     */
+    async startRecording() {
+        try {
+            // Request access to camera and microphone
+            this.stream = await navigator.mediaDevices.getUserMedia({
+                video: { 
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                },
+                audio: true
+            });
+
+            const mimeType = this.getSupportedMimeType();
+            if (!mimeType) {
+                throw new Error('No supported MIME type for video recording');
+            }
+
+            this.mediaRecorder = new MediaRecorder(this.stream, {
+                mimeType: mimeType
+            });
+
+            this.recordedChunks = [];
+            this.isRecording = true;
+            this.recordingStartTime = Date.now();
+
+            this.mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    this.recordedChunks.push(event.data);
+                }
+            };
+
+            this.mediaRecorder.onerror = (event) => {
+                console.error('❌ Recording error:', event.error);
+                Toast.show('Recording error: ' + event.error, 'error');
+            };
+
+            this.mediaRecorder.start();
+            console.log('✅ Video recording started');
+            return true;
+
+        } catch (error) {
+            console.error('❌ Failed to start recording:', error);
+            
+            if (error.name === 'NotAllowedError') {
+                Toast.show('Camera/Microphone access denied. Enable permissions in settings.', 'error');
+            } else if (error.name === 'NotFoundError') {
+                Toast.show('No camera/microphone found on this device', 'error');
+            } else {
+                Toast.show('Failed to access camera: ' + error.message, 'error');
+            }
+            
+            return false;
+        }
+    }
+
+    /**
+     * Stop video recording and return the blob
+     * @returns {Promise<Blob|null>} Video blob or null if failed
+     */
+    async stopRecording() {
+        return new Promise((resolve) => {
+            if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
+                resolve(null);
+                return;
+            }
+
+            this.mediaRecorder.onstop = () => {
+                // Stop all tracks
+                if (this.stream) {
+                    this.stream.getTracks().forEach(track => track.stop());
+                }
+
+                // Create blob from recorded chunks
+                const mimeType = this.mediaRecorder.mimeType;
+                const blob = new Blob(this.recordedChunks, { type: mimeType });
+
+                this.isRecording = false;
+                this.recordingDuration = Date.now() - this.recordingStartTime;
+
+                console.log(`✅ Recording stopped. Duration: ${(this.recordingDuration / 1000).toFixed(2)}s, Size: ${(blob.size / 1024 / 1024).toFixed(2)}MB`);
+                resolve(blob);
+            };
+
+            this.mediaRecorder.stop();
+        });
+    }
+
+    /**
+     * Get supported MIME type for video recording
+     * @returns {string|null} Supported MIME type
+     */
+    getSupportedMimeType() {
+        const types = [
+            'video/webm;codecs=vp9,opus',
+            'video/webm;codecs=vp8,opus',
+            'video/webm;codecs=h264,opus',
+            'video/webm',
+            'video/mp4'
+        ];
+
+        for (const type of types) {
+            if (MediaRecorder.isTypeSupported(type)) {
+                return type;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Get current recording status
+     */
+    getStatus() {
+        return {
+            isRecording: this.isRecording,
+            duration: this.recordingDuration,
+            durationFormatted: this.formatDuration(this.recordingDuration)
+        };
+    }
+
+    /**
+     * Format milliseconds to readable format
+     */
+    formatDuration(ms) {
+        const seconds = Math.floor(ms / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${minutes}:${secs.toString().padStart(2, '0')}`;
+    }
+}
+
+// ============================================
 // ACTION CARDS & SOS BUTTON
 // ============================================
 
@@ -314,45 +486,295 @@ class ActionHandler {
     }
 
     static triggerSOS() {
-        Toast.show('🚨 SOS Alert Sent! Emergency contacts notified.', 'error', 4000);
+        // Launch video recording modal instead of immediately sending
+        ActionHandler.openVideoRecordingModal();
+    }
+
+    static openVideoRecordingModal() {
+        Toast.show('🎥 Opening SOS Video Recording...', 'info');
         
-        // Try to send to API
-        const API_URL = `${ML_API_URL}/api/sos`;
+        const app = document.getElementById('app') || document.body;
+        
+        // Create modal overlay
+        const modal = document.createElement('div');
+        modal.className = 'video-recording-modal active';
+        modal.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.95);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+            animation: fadeIn 300ms ease-out;
+        `;
 
-        const sendSOS = (latitude = 0, longitude = 0) => {
-            fetch(API_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    type: 'SOS',
-                    details: 'SOS Button Pressed',
-                    location: { lat: latitude, lng: longitude }
-                })
-            }).catch((error) => {
-                // Offline mode
-                console.error("SOS API Failed:", error);
-                console.log('API unavailable - running in offline mode');
-            });
-        };
+        modal.innerHTML = `
+            <div style="
+                background: white;
+                border-radius: 16px;
+                padding: 24px;
+                max-width: 500px;
+                width: 90%;
+                max-height: 90vh;
+                display: flex;
+                flex-direction: column;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                animation: slideUp 300ms ease-out;
+            ">
+                <!-- Header -->
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h2 style="margin: 0; color: #ef4444; font-size: 24px;">🚨 SOS RECORDING</h2>
+                    <button class="video-close-btn" style="
+                        background: none;
+                        border: none;
+                        font-size: 28px;
+                        cursor: pointer;
+                        color: #666;
+                        padding: 0;
+                    ">✕</button>
+                </div>
 
-        if (navigator.geolocation) {
-            navigator.geolocation.getCurrentPosition(
-                (position) => sendSOS(position.coords.latitude, position.coords.longitude),
-                (error) => {
-                    console.error("Geolocation error:", error);
-                    sendSOS();
+                <!-- Instructions -->
+                <div style="
+                    background: #fef2f2;
+                    border-left: 4px solid #ef4444;
+                    padding: 12px;
+                    margin-bottom: 20px;
+                    border-radius: 4px;
+                    font-size: 14px;
+                    color: #666;
+                ">
+                    <strong>⚠️ Important:</strong> Record the threat/incident. Your video will be analyzed by our threat detection AI and the incident will be saved to your record.
+                </div>
+
+                <!-- Video Feed -->
+                <video id="video-preview" style="
+                    width: 100%;
+                    background: #000;
+                    border-radius: 8px;
+                    margin-bottom: 16px;
+                    aspect-ratio: 16/9;
+                    object-fit: cover;
+                " playsinline autoplay muted></video>
+
+                <!-- Timer Display -->
+                <div id="recording-timer" style="
+                    text-align: center;
+                    font-size: 32px;
+                    font-weight: bold;
+                    color: #10b981;
+                    margin-bottom: 16px;
+                    display: none;
+                    font-family: monospace;
+                ">00:00</div>
+
+                <!-- Status Message -->
+                <div id="recording-status" style="
+                    text-align: center;
+                    font-size: 14px;
+                    color: #ef4444;
+                    margin-bottom: 16px;
+                    font-weight: 500;
+                ">Ready to record</div>
+
+                <!-- Controls -->
+                <div style="display: flex; gap: 12px;">
+                    <button id="start-recording-btn" style="
+                        flex: 1;
+                        background: #ef4444;
+                        color: white;
+                        border: none;
+                        padding: 14px;
+                        border-radius: 8px;
+                        font-size: 16px;
+                        font-weight: 600;
+                        cursor: pointer;
+                        transition: all 200ms;
+                    ">🎥 START RECORDING</button>
+                    <button id="stop-recording-btn" style="
+                        flex: 1;
+                        background: #10b981;
+                        color: white;
+                        border: none;
+                        padding: 14px;
+                        border-radius: 8px;
+                        font-size: 16px;
+                        font-weight: 600;
+                        cursor: pointer;
+                        transition: all 200ms;
+                        display: none;
+                    ">⏹️ STOP & SEND</button>
+                </div>
+
+                <!-- Cancel -->
+                <button id="cancel-recording-btn" style="
+                    width: 100%;
+                    background: #e5e7eb;
+                    color: #666;
+                    border: none;
+                    padding: 12px;
+                    border-radius: 8px;
+                    font-size: 14px;
+                    cursor: pointer;
+                    margin-top: 12px;
+                    transition: all 200ms;
+                ">CANCEL</button>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        // Initialize video recorder
+        const recorder = new VideoRecorder();
+        let timerInterval = null;
+        let recordingInProgress = false;
+
+        // Get elements
+        const videoPreview = modal.querySelector('#video-preview');
+        const startBtn = modal.querySelector('#start-recording-btn');
+        const stopBtn = modal.querySelector('#stop-recording-btn');
+        const cancelBtn = modal.querySelector('#cancel-recording-btn');
+        const closeBtn = modal.querySelector('.video-close-btn');
+        const timerDisplay = modal.querySelector('#recording-timer');
+        const statusDisplay = modal.querySelector('#recording-status');
+
+        // Start Recording
+        startBtn.addEventListener('click', async () => {
+            const success = await recorder.startRecording();
+            if (success) {
+                recordingInProgress = true;
+                
+                // Show video preview
+                videoPreview.srcObject = recorder.stream;
+                
+                // Update UI
+                startBtn.style.display = 'none';
+                stopBtn.style.display = 'block';
+                timerDisplay.style.display = 'block';
+                statusDisplay.textContent = '🔴 RECORDING IN PROGRESS';
+                statusDisplay.style.color = '#ef4444';
+
+                // Start timer
+                timerInterval = setInterval(() => {
+                    const status = recorder.getStatus();
+                    timerDisplay.textContent = status.durationFormatted;
+                }, 100);
+
+                Toast.show('🔴 Recording started - speak clearly about the incident', 'success');
+            }
+        });
+
+        // Stop Recording
+        stopBtn.addEventListener('click', async () => {
+            if (timerInterval) clearInterval(timerInterval);
+            
+            stopBtn.disabled = true;
+            statusDisplay.textContent = '⏳ Processing video...';
+            statusDisplay.style.color = '#f59e0b';
+
+            // Stop recording
+            const videoBlob = await recorder.stopRecording();
+
+            if (!videoBlob) {
+                statusDisplay.textContent = 'Failed to record video';
+                statusDisplay.style.color = '#ef4444';
+                stopBtn.disabled = false;
+                return;
+            }
+
+            // Send to backend
+            recordingInProgress = false;
+            await ActionHandler.sendSOSWithVideo(videoBlob, recorder);
+            
+            // Close modal
+            modal.classList.remove('active');
+            setTimeout(() => modal.remove(), 300);
+        });
+
+        // Cancel button
+        cancelBtn.addEventListener('click', () => {
+            if (recordingInProgress) {
+                recorder.stopRecording().then(blob => {
+                    if (blob) {
+                        console.log('Recording discarded');
+                    }
+                });
+            }
+            modal.classList.remove('active');
+            setTimeout(() => modal.remove(), 300);
+            Toast.show('SOS recording cancelled', 'info');
+        });
+
+        // Close button
+        closeBtn.addEventListener('click', () => {
+            cancelBtn.click();
+        });
+
+        // Add keyframe animations
+        const styleTag = document.createElement('style');
+        styleTag.textContent = `
+            @keyframes fadeIn {
+                from { opacity: 0; }
+                to { opacity: 1; }
+            }
+            @keyframes slideUp {
+                from { transform: translateY(20px); opacity: 0; }
+                to { transform: translateY(0); opacity: 1; }
+            }
+            .video-recording-modal.active {
+                animation: fadeIn 300ms ease-out;
+            }
+        `;
+        document.head.appendChild(styleTag);
+    }
+
+    static async sendSOSWithVideo(videoBlob, recorder) {
+        Toast.show('📤 Uploading video to threat detection...', 'info');
+        
+        try {
+            // Get location
+            const location = await new Promise((resolve) => {
+                if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                        (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+                        () => resolve({ lat: 0, lng: 0 })
+                    );
+                } else {
+                    resolve({ lat: 0, lng: 0 });
                 }
-            );
-        } else {
-            sendSOS();
-        }
+            });
 
-        // Visual feedback
-        const sosButton = document.getElementById('sosButton');
-        sosButton.style.animation = 'none';
-        setTimeout(() => {
-            sosButton.style.animation = '';
-        }, 100);
+            // Create FormData for multipart upload
+            const formData = new FormData();
+            formData.append('video', videoBlob, 'sos_recording.webm');
+            formData.append('type', 'SOS');
+            formData.append('latitude', location.lat);
+            formData.append('longitude', location.lng);
+            formData.append('duration_seconds', Math.floor(recorder.recordingDuration / 1000));
+
+            // Upload to backend
+            const response = await fetch(`${ML_API_URL}/api/sos-video`, {
+                method: 'POST',
+                body: formData
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                Toast.show('✅ SOS Alert sent! Video being analyzed...', 'success', 5000);
+                console.log('SOS Response:', result);
+            } else {
+                Toast.show('⚠️ SOS sent, but video processing encountered an error', 'error', 4000);
+            }
+
+        } catch (error) {
+            console.error('Error sending SOS video:', error);
+            Toast.show('❌ Failed to send SOS: ' + error.message, 'error', 5000);
+        }
     }
 }
 
@@ -544,26 +966,8 @@ try {
             // Event listeners
             const sosBtn = document.getElementById('sos-btn');
             sosBtn?.addEventListener('click', () => {
-                sosActive = !sosActive;
-                sosBtn.innerHTML = `
-                    <div class="sos-content">
-                        <span class="sos-text">${sosActive ? 'SOS' : 'SOS'}</span>
-                        <span class="sos-subtext">${sosActive ? 'SENDING ALERT...' : 'HOLD 3 SEC'}</span>
-                    </div>
-                    ${!sosActive ? '<div class="sos-ring"></div>' : ''}
-                `;
-                sosBtn.classList.toggle('active');
-                
-                const sosMessage = app.querySelector('.sos-message');
-                if (sosMessage) {
-                    sosMessage.textContent = sosActive ? 'Notifying Emergency Contacts & Police...' : 'Tap for Emergency Assistance';
-                }
-
-                if (sosActive) {
-                    Toast.show('🚨 SOS Alert Activated! Emergency contacts notified.', 'success');
-                } else {
-                    Toast.show('🔴 SOS Alert Deactivated', 'info');
-                }
+                // Trigger video recording for SOS
+                ActionHandler.triggerSOS();
             });
 
             const dismissBtn = document.getElementById('dismiss-threat');
@@ -965,68 +1369,74 @@ try {
 
     // GUARDIAN DASHBOARD
     const GuardianPage = {
-        init(params = {}) {
+        async init(params = {}) {
             const app = document.getElementById('app');
             
-            // Guardian data
-            const lovedOne = {
-                name: "Sarah Parker",
-                status: "Safe at Work",
-                location: "Design District, 4th Ave",
-                lastUpdate: "Just now",
-                battery: 85,
-                signal: "Strong",
-                isSafe: true
-            };
+            // Fetch guardian data from the new JSON file
+            let lovedOneData;
+            try {
+                const response = await fetch('./loved-one.json');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                lovedOneData = await response.json();
+            } catch (error) {
+                console.error("Could not load loved-one data:", error);
+                Toast.show("Failed to load dashboard data.", "error");
+                // Use fallback data
+                lovedOneData = {
+                    name: "Sarah Parker",
+                    status: "Safe at Work",
+                    location: { name: "Design District, 4th Ave", latitude: 40.7128, longitude: -74.0060 },
+                    lastUpdate: "Just now",
+                    battery: 85,
+                    signal: "Strong",
+                    isSafe: true,
+                    avatar: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=200&h=200",
+                    timeline: [{ id: 1, time: "09:30 AM", event: "Arrived at Office", type: "safe" }],
+                    alerts: [{ id: 1, type: "Route Deviation", time: "Yesterday", message: "Detour detected.", resolved: true }]
+                };
+            }
 
-            const timeline = [
-                { id: 1, time: "09:30 AM", event: "Arrived at Office", type: "safe" },
-                { id: 2, time: "08:45 AM", event: "Boarded Metro", type: "transit" },
-                { id: 3, time: "08:30 AM", event: "Left Home", type: "transit" },
-            ];
-
-            const alerts = [
-                { id: 1, type: "Route Deviation", time: "Yesterday, 6:45 PM", message: "Took a different route home (Detour detected).", resolved: true }
-            ];
+            const { name, status, location, lastUpdate, battery, signal, isSafe, avatar, timeline, alerts } = lovedOneData;
 
             app.innerHTML = `
                 <div class="guardian-dashboard-container">
                     <!-- Header Greeting -->
                     <header class="guardian-header">
                         <h1>Hello, <span class="text-pink">Martha</span></h1>
-                        <p>Here is Sarah's activity for today.</p>
+                        <p>Here is ${name}'s activity for today.</p>
                     </header>
 
                     <div class="guardian-grid">
                         <!-- Left Column: Profile & Status -->
                         <div class="guardian-left-column">
-
                             <!-- Loved One Profile Card -->
                             <div class="profile-card">
                                 <div class="profile-avatar">
-                                    <img src="https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=200&h=200" alt="Sarah" />
+                                    <img src="${avatar}" alt="${name}" />
                                 </div>
-                                <h2 class="profile-name">${lovedOne.name}</h2>
-                                <div class="profile-status safe">
+                                <h2 class="profile-name">${name}</h2>
+                                <div class="profile-status ${isSafe ? 'safe' : 'unsafe'}">
                                     <span class="status-dot"></span>
-                                    ${lovedOne.status}
+                                    ${status}
                                 </div>
 
                                 <!-- Vitals -->
                                 <div class="vitals-section">
                                     <div class="vital">
                                         <span class="vital-icon">🔋</span>
-                                        <span class="vital-value">${lovedOne.battery}%</span>
+                                        <span class="vital-value">${battery}%</span>
                                     </div>
                                     <div class="vital-divider"></div>
                                     <div class="vital">
                                         <span class="vital-icon">📶</span>
-                                        <span class="vital-value">${lovedOne.signal}</span>
+                                        <span class="vital-value">${signal}</span>
                                     </div>
                                     <div class="vital-divider"></div>
                                     <div class="vital">
                                         <span class="vital-icon">🕐</span>
-                                        <span class="vital-value">${lovedOne.lastUpdate}</span>
+                                        <span class="vital-value">${lastUpdate}</span>
                                     </div>
                                 </div>
 
@@ -1055,26 +1465,12 @@ try {
                             </div>
                         </div>
 
-                        <!-- Right Column: Map & Timeline -->
                         <div class="guardian-right-column">
                             <!-- Live Map Card -->
                             <div class="live-map-card">
-                                <div class="map-container">
-                                    <div class="map-grid"></div>
-                                    <div class="location-pin">
-                                        <div class="ping-animation"></div>
-                                        <div class="pin-avatar">
-                                            <img src="https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=100&h=100" alt="Sarah" />
-                                            <span class="live-badge">Live</span>
-                                        </div>
-                                        <div class="location-info">
-                                            <p class="location-name">${lovedOne.location}</p>
-                                            <p class="location-meta">Updated now • Accuracy 5m</p>
-                                        </div>
-                                    </div>
-                                </div>
+                                <div class="map-container" id="guardian-live-map"></div>
                                 <div class="map-controls">
-                                    <button class="map-btn" id="guardian-map">📍</button>
+                                    <button class="map-btn" id="guardian-map-recenter">📍</button>
                                 </div>
                             </div>
 
@@ -1102,21 +1498,61 @@ try {
                 </div>
             `;
 
+            // Initialize map after innerHTML is set
+            this.initGuardianMap(location.latitude, location.longitude, name, avatar, status);
+
             // Attach event listeners
             document.getElementById('guardian-message')?.addEventListener('click', () => {
-                Toast.show('💬 Opening message to Sarah...', 'info');
+                Toast.show(`💬 Opening message to ${name}...`, 'info');
             });
 
             document.getElementById('guardian-call')?.addEventListener('click', () => {
-                Toast.show('☎️ Calling Sarah...', 'info');
+                Toast.show(`☎️ Calling ${name}...`, 'info');
             });
 
             document.getElementById('guardian-video')?.addEventListener('click', () => {
                 Toast.show('🎥 Starting video check-in...', 'info');
             });
 
-            document.getElementById('guardian-map')?.addEventListener('click', () => {
+            document.getElementById('guardian-map-recenter')?.addEventListener('click', () => {
                 Toast.show('📍 Opening live map...', 'info');
+            });
+        },
+
+        initGuardianMap(lat, lng, name, avatar, status) {
+            const mapContainer = document.getElementById('guardian-live-map');
+            if (!mapContainer) {
+                console.error('Map container not found for guardian dashboard');
+                return;
+            }
+            
+            // Use requestAnimationFrame to ensure map initializes after DOM paint for better perceived speed
+            requestAnimationFrame(() => {
+                const map = L.map(mapContainer, {
+                    zoomControl: false,
+                    attributionControl: false,
+                    preferCanvas: true // Use Canvas renderer for better performance
+                }).setView([lat, lng], 15);
+
+                L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+                    crossOrigin: true, // Enable CORS for faster tile loading
+                    maxZoom: 20
+                }).addTo(map);
+
+                const customIcon = L.divIcon({
+                    className: 'custom-map-marker',
+                    html: `<div class="location-pin-guardian"><div class="ping-animation-guardian"></div><img src="${avatar}" alt="${name}" /></div>`,
+                    iconSize: [40, 40],
+                    iconAnchor: [20, 40]
+                });
+
+                L.marker([lat, lng], { icon: customIcon }).addTo(map)
+                    .bindPopup(`<b>${name}</b><br>${status}`)
+                    .openPopup();
+                
+                // Force a resize check to ensure tiles load correctly if container size was dynamic
+                setTimeout(() => map.invalidateSize(), 200);
             });
         },
 
@@ -1391,7 +1827,7 @@ try {
                     try { window.__safesphere_current_page.teardown(); } catch(e){}
                 }
                 window.__safesphere_current_page = page;
-                page.init(params);
+                await page.init(params);
                 console.log(`✅ Loaded role page: ${role}`);
             } else {
                 console.warn(`Role page for '${role}' not found`);

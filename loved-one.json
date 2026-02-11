@@ -1,0 +1,22 @@
+{
+    "name": "Sarah Parker",
+    "status": "Safe at Work",
+    "location": {
+      "name": "Design District, 4th Ave",
+      "latitude": 28.7128,
+      "longitude": 77.0060
+    },
+    "lastUpdate": "Just now",
+    "battery": 85,
+    "signal": "Strong",
+    "isSafe": true,
+    "avatar": "https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=200&h=200",
+    "timeline": [
+      { "id": 1, "time": "09:30 AM", "event": "Arrived at Office", "type": "safe" },
+      { "id": 2, "time": "08:45 AM", "event": "Boarded Metro", "type": "transit" },
+      { "id": 3, "time": "08:30 AM", "event": "Left Home", "type": "transit" }
+    ],
+    "alerts": [
+      { "id": 1, "type": "Route Deviation", "time": "Yesterday, 6:45 PM", "message": "Took a different route home (Detour detected).", "resolved": true }
+    ]
+}

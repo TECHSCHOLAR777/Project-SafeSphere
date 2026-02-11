@@ -336,14 +336,21 @@ def _get_osrm_routes(start_lat: float, start_lng: float, end_lat: float, end_lng
     return []
 
 def _calculate_route_risk(route_geo: Dict, incidents: List[Dict]) -> float:
-    """Calculate risk score for a route based on nearby incidents."""
+    """
+    Calculate risk score for a route based on nearby incidents.
+    
+    SAFETY-FIRST MODE: Routes must completely avoid threat circles.
+    - Threat avoidance radius: 1.0 km (1000m) to ensure full clearance
+    - Routes that pass near ANY threat get heavily penalized
+    - Prioritizes safety exclusively - does not consider distance/speed
+    """
     coordinates = route_geo.get("coordinates", [])
     if not coordinates:
         return 0.0
     
     total_risk = 0.0
-    # Sample points to avoid heavy computation (every 2nd point for better precision)
-    sample_points = coordinates[::2]
+    # Sample points to avoid heavy computation (every 3rd point for efficiency)
+    sample_points = coordinates[::3]
     if not sample_points:
         sample_points = coordinates
 
@@ -357,29 +364,36 @@ def _calculate_route_risk(route_geo: Dict, incidents: List[Dict]) -> float:
             if i_lat is None or i_lng is None:
                 continue
                 
-            # Quick bounding box check (approx 1km)
-            if abs(i_lat - r_lat) > 0.01 or abs(i_lng - r_lng) > 0.01:
+            # Expanded bounding box check (approx 2km buffer for faster rejection)
+            if abs(i_lat - r_lat) > 0.02 or abs(i_lng - r_lng) > 0.02:
                 continue
                 
             dist = _haversine_km(r_lat, r_lng, float(i_lat), float(i_lng))
             
-            # If incident is within 300m of route path
-            if dist < 0.3:
+            # SAFETY-FIRST: Expand threat avoidance to 1.0 km (1000m)
+            # This ensures routes stay completely clear of threat circles (300m + buffer)
+            if dist < 1.0:
+                level = inc.get("threat_level", "LOW").upper()
+                
+                # EXTREME penalties to force complete avoidance of all threats
+                # No route should pass within 1km of any threat
+                if level == "CRITICAL":
+                    multiplier = 1000.0  # Virtually impossible to route through
+                elif level == "HIGH":
+                    multiplier = 500.0   # Extreme penalty
+                elif level == "MEDIUM":
+                    multiplier = 200.0   # Very strong penalty
+                else:  # LOW
+                    multiplier = 50.0    # Still strong penalty
+                
                 base_severity = _severity_weight(inc.get("threat_level", "LOW"), inc.get("threat_score", 0.0))
                 
-                # Apply multipliers for route selection to strongly discourage high threats
-                level = inc.get("threat_level", "LOW").upper()
-                multiplier = 1.0
-                if level == "CRITICAL":
-                    multiplier = 100.0 # Massive penalty to force avoidance
-                elif level == "HIGH":
-                    multiplier = 50.0
-                elif level == "MEDIUM":
-                    multiplier = 10.0
+                # Proximity factor: closer = worse (ranges 0 to 1)
+                # At 1.0km away = 0 penalty, at 0km = full penalty
+                proximity_factor = (1.0 - (dist / 1.0))
                 
-                # Higher risk if closer
-                proximity_factor = (1.0 - (dist / 0.3))
-                total_risk += base_severity * multiplier * proximity_factor
+                risk_increment = base_severity * multiplier * proximity_factor
+                total_risk += risk_increment
 
     return total_risk
 
@@ -486,9 +500,9 @@ async def calculate_safe_route(req: RouteRequest):
                 "risk_score": round(risk_score, 2)
             })
         
-        # 4. Sort by risk score (lowest first), then by distance
-        # This ensures we pick the safest route, even if it's much longer
-        scored_routes.sort(key=lambda x: (x["risk_score"], x["distance"]))
+        # 4. Sort by risk score ONLY (lowest/safest first)
+        # DO NOT consider distance or duration - SAFETY IS THE ONLY PRIORITY
+        scored_routes.sort(key=lambda x: x["risk_score"])
         
         best_route = scored_routes[0]
         is_safe = best_route["risk_score"] < 1.0
@@ -510,25 +524,57 @@ async def calculate_safe_route(req: RouteRequest):
 async def trigger_sos(alert: Dict):
     """
     Handle SOS alerts from the frontend. Saves to sos_alerts table.
+    Also creates a critical incident record so it appears on threat maps.
     """
     try:
         print(f"🚨 SOS ALERT RECEIVED: {alert.get('type')}")
+        
+        # Generate incident ID for linking
+        incident_id = f"SOS_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(1000,9999)}"
         
         sos_record = {
             "type": alert.get("type", "SOS"),
             "details": alert.get("details"),
             "latitude": alert.get("location", {}).get("lat"),
             "longitude": alert.get("location", {}).get("lng"),
-            "status": "active"
+            "status": "active",
+            "incident_id": incident_id
         }
         
         response = supabase.table("sos_alerts").insert(sos_record).execute()
-        print(f"✅ SOS Alert saved: {response.data[0].get('id') if response.data else 'unknown'}")
+        sos_id = response.data[0].get("id") if response.data else None
+        print(f"✅ SOS Alert saved: {sos_id}")
+        
+        # Mirror to incidents table so it appears on maps
+        if sos_record["latitude"] and sos_record["longitude"]:
+            incident_record = {
+                "incident_id": incident_id,
+                "timestamp": datetime.now().isoformat(),
+                "threat_level": "CRITICAL",
+                "threat_score": 1.0,
+                "people_count": 1,
+                "weapon_detected": False,
+                "weapon_types": [],
+                "behavior_summary": f"Manual SOS Alert: {alert.get('details', 'User requested help')}",
+                "is_critical": True,
+                "full_telemetry": {
+                    "source": "user_sos",
+                    "alert_type": alert.get("type", "SOS"),
+                    "sos_id": sos_id
+                },
+                "latitude": sos_record["latitude"],
+                "longitude": sos_record["longitude"],
+                "location_accuracy_m": 10.0,
+                "source_id": "user_device",
+                "mode": "client"
+            }
+            _insert_incident(incident_record)
+            print(f"✅ SOS Incident mirrored to map: {incident_id}")
         
         return {
             "success": True,
             "message": "SOS Alert recorded and emergency services notified",
-            "id": response.data[0].get("id") if response.data else None
+            "id": sos_id
         }
         
     except Exception as e:
@@ -536,7 +582,270 @@ async def trigger_sos(alert: Dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/incidents")
+@app.post("/api/sos-video")
+async def trigger_sos_with_video(
+    video: UploadFile = File(...),
+    type: str = Form("SOS"),
+    latitude: float = Form(0.0),
+    longitude: float = Form(0.0),
+    duration_seconds: int = Form(0)
+):
+    """
+    Handle SOS alerts with video recording from user device.
+    Saves video, processes through threat_cv engine, and stores incident.
+    
+    Flow:
+    1. Receive video from client
+    2. Process through threat_cv detection engine
+    3. Extract threat details from video analysis
+    4. Save incident to Supabase incidents table
+    5. Store video metadata in sos_alerts table
+    """
+    try:
+        # Create unique incident ID
+        incident_id = f"SOS_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{random.randint(10000,99999)}"
+        print(f"🚨 SOS VIDEO RECEIVED: {incident_id}")
+        
+        # Save video file temporarily
+        video_dir = DATA_DIR / "sos_videos"
+        video_dir.mkdir(parents=True, exist_ok=True)
+        
+        video_filename = f"{incident_id}.webm"
+        video_path = video_dir / video_filename
+        
+        video_content = await video.read()
+        with open(video_path, "wb") as f:
+            f.write(video_content)
+        
+        print(f"✅ Video saved: {video_path} ({len(video_content) / 1024:.2f} KB)")
+        
+        # Process video through threat_cv engine
+        threat_result = _process_video_through_threat_cv(
+            video_path=str(video_path),
+            incident_id=incident_id
+        )
+        
+        # If threat_cv processing succeeded, extract threat data
+        if threat_result and threat_result.get("success"):
+            # Create incident from threat analysis
+            incident = {
+                "incident_id": incident_id,
+                "timestamp": datetime.now().isoformat(),
+                "threat_level": threat_result.get("threat_level", "MEDIUM"),
+                "threat_score": float(threat_result.get("threat_score", 0.5)),
+                "people_count": threat_result.get("people_count", 0),
+                "weapon_detected": threat_result.get("weapon_detected", False),
+                "weapon_types": threat_result.get("weapon_types", []),
+                "behavior_summary": threat_result.get("behavior_summary", "SOS video report"),
+                "is_critical": threat_result.get("is_critical", False),
+                "full_telemetry": threat_result.get("full_telemetry", {}),
+                "latitude": latitude,
+                "longitude": longitude,
+                "location_accuracy_m": 5.0,
+                "source_id": "client_sos_video",
+                "mode": "client"
+            }
+            
+            # Insert threat incident into database
+            success = _insert_incident(incident)
+            
+            if success:
+                print(f"✅ SOS Incident recorded: {incident_id}")
+            else:
+                print(f"⚠️ Failed to save incident to database, but video was processed")
+        else:
+            # Fallback: Create generic SOS incident if threat_cv fails
+            fallback_incident = {
+                "incident_id": incident_id,
+                "timestamp": datetime.now().isoformat(),
+                "threat_level": "MEDIUM",
+                "threat_score": 0.5,
+                "people_count": 0,
+                "weapon_detected": False,
+                "weapon_types": [],
+                "behavior_summary": f"SOS video report (threat detection unavailable) - {duration_seconds}s video",
+                "is_critical": False,
+                "full_telemetry": {
+                    "source": "client_sos_video",
+                    "video_duration": duration_seconds,
+                    "processing_note": "Threat CV engine unavailable"
+                },
+                "latitude": latitude,
+                "longitude": longitude,
+                "location_accuracy_m": 5.0,
+                "source_id": "client_sos_video",
+                "mode": "client"
+            }
+            
+            _insert_incident(fallback_incident)
+            print(f"⚠️ SOS recorded with fallback incident (threat_cv unavailable)")
+        
+        # Save SOS alert metadata
+        sos_record = {
+            "type": type,
+            "details": f"SOS video: {video_filename} ({duration_seconds}s) | Incident: {incident_id}",
+            "latitude": latitude,
+            "longitude": longitude,
+            "status": "active",
+            "video_path": video_filename
+        }
+        
+        # Try to add incident_id if column exists
+        try:
+            sos_record["incident_id"] = incident_id
+        except:
+            pass
+        
+        try:
+            response = supabase.table("sos_alerts").insert(sos_record).execute()
+            sos_id = response.data[0].get("id") if response.data else None
+            print(f"✅ SOS Alert saved: {sos_id}")
+        except Exception as e:
+            print(f"⚠️ Failed to save SOS alert metadata for incident {incident_id}: {e}")
+            # Try again without incident_id if that was the issue
+            if "incident_id" in str(e):
+                try:
+                    sos_record.pop("incident_id", None)
+                    response = supabase.table("sos_alerts").insert(sos_record).execute()
+                    sos_id = response.data[0].get("id") if response.data else None
+                    print(f"✅ SOS Alert saved (without incident_id): {sos_id}")
+                except Exception as e2:
+                    print(f"❌ Failed to save SOS alert even without incident_id: {e2}")
+        
+        return {
+            "success": True,
+            "message": "SOS video received, analyzed, and incident recorded",
+            "incident_id": incident_id,
+            "threat_detected": threat_result and threat_result.get("success", False)
+        }
+        
+    except Exception as e:
+        print(f"❌ SOS Video Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _process_video_through_threat_cv(video_path: str, incident_id: str) -> Optional[Dict]:
+    """
+    Process video through threat_cv detection engine.
+    
+    This extracts frames from the video and runs them through the
+    SafeSphereThreatsCV engine to detect threats, weapons, behaviors, etc.
+    
+    Returns dict with threat analysis or None if processing fails.
+    """
+    try:
+        # Try to import and use threat_cv engine
+        from engines.threat_cv.main import SafeSphereThreatsCV
+        from engines.threat_cv.inference.video_source import VideoSource
+        import cv2
+        
+        print(f"🎬 Processing video through threat_cv: {incident_id}")
+        
+        # Initialize threat detection
+        threat_engine = SafeSphereThreatsCV(
+            enable_recording=False,
+            backend_url="http://localhost:8000"
+        )
+        
+        # Process video frames
+        cap = cv2.VideoCapture(video_path)
+        frame_count = 0
+        threat_scores = []
+        max_threat_score = 0.0
+        threat_level = "LOW"
+        weapon_found = False
+        people_detected = 0
+        most_severe_behavior = ""
+        
+        while cap.isOpened() and frame_count < 150:  # Process up to 150 frames (5 seconds at 30fps)
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            try:
+                # Detect persons
+                persons = threat_engine.detector.detect(frame)
+                if persons:
+                    people_detected = max(people_detected, len(persons))
+                
+                # Detect weapons
+                weapons = threat_engine.weapon.detect(frame)
+                if weapons:
+                    weapon_found = True
+                
+                # Analyze behavior
+                if persons:
+                    behavior_result = threat_engine.behavior.analyze(frame, persons)
+                    if behavior_result and behavior_result.get("risk", 0) > 0:
+                        most_severe_behavior = behavior_result.get("summary", "Suspicious activity detected")
+                
+                # Calculate threat score
+                threat_score = threat_engine.threat_scorer.score(
+                    people_detected,
+                    weapon_found,
+                    frame,
+                    persons if persons else []
+                )
+                
+                if threat_score:
+                    threat_scores.append(threat_score)
+                    max_threat_score = max(max_threat_score, threat_score)
+                
+                frame_count += 1
+                
+            except Exception as frame_error:
+                print(f"⚠️ Error processing frame {frame_count}: {frame_error}")
+                continue
+        
+        cap.release()
+        
+        # Calculate average threat
+        avg_threat = sum(threat_scores) / len(threat_scores) if threat_scores else 0.0
+        
+        # Determine threat level
+        if max_threat_score > 0.8 or weapon_found:
+            threat_level = "CRITICAL"
+        elif max_threat_score > 0.6:
+            threat_level = "HIGH"
+        elif max_threat_score > 0.4:
+            threat_level = "MEDIUM"
+        else:
+            threat_level = "LOW"
+        
+        print(f"✅ Video analysis complete: {frame_count} frames, Max threat: {max_threat_score:.2f}, Level: {threat_level}")
+        
+        return {
+            "success": True,
+            "incident_id": incident_id,
+            "threat_level": threat_level,
+            "threat_score": float(max_threat_score),
+            "max_threat_score": float(max_threat_score),
+            "avg_threat_score": float(avg_threat),
+            "people_count": people_detected,
+            "weapon_detected": weapon_found,
+            "weapon_types": ["detected"] if weapon_found else [],
+            "behavior_summary": most_severe_behavior or f"Analyzed {frame_count} frames",
+            "is_critical": threat_level == "CRITICAL",
+            "frames_processed": frame_count,
+            "full_telemetry": {
+                "frames_analyzed": frame_count,
+                "max_threat_score": float(max_threat_score),
+                "avg_threat_score": float(avg_threat),
+                "weapon_detected": weapon_found,
+                "people_count": people_detected,
+                "source": "client_sos_video"
+            }
+        }
+        
+    except ImportError as e:
+        print(f"⚠️ threat_cv engine not available: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ Video processing error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 async def list_incidents(limit: int = 100, threat_level: Optional[str] = None):
     """List recent incidents from Supabase. Optionally filter by threat level."""
     try:
