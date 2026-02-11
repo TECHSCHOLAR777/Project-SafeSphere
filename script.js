@@ -6,6 +6,12 @@
 // TOAST NOTIFICATIONS
 // ============================================
 import supabase from './Supabase.js';
+
+// Define the ML API URL. For Vite, use import.meta.env with VITE_ prefix.
+// Create a .env file in your project root and add:
+// VITE_ML_API_URL=http://your-api-url.com
+const ML_API_URL = import.meta.env.VITE_ML_API_URL || 'http://localhost:8000';
+
 class Toast {
     static show(message, type = 'info', duration = 3000) {
         const container = document.getElementById('toastContainer');
@@ -311,11 +317,7 @@ class ActionHandler {
         Toast.show('🚨 SOS Alert Sent! Emergency contacts notified.', 'error', 4000);
         
         // Try to send to API
-<<<<<<< HEAD
-        const API_URL = 'https://improved-train-v679p9p5jr5p35gp-8000.app.github.dev/api/sos';
-=======
-        const API_URL = 'https://stunning-halibut-974rgpw767pp3pxgg-8000.app.github.dev/api/sos';
->>>>>>> 3c57bd1 (use page initiated)
+        const API_URL = `${ML_API_URL}/api/sos`;
 
         const sendSOS = (latitude = 0, longitude = 0) => {
             fetch(API_URL, {
@@ -501,21 +503,21 @@ try {
                         <!-- Feature Cards -->
                         <div class="feature-cards-grid">
                             <!-- Safe Route Card -->
-                            <div class="feature-card feature-card-blue">
+                            <div class="feature-card feature-card-blue" data-feature="safe-route">
                                 <div class="feature-icon">🧭</div>
                                 <h3>Safe Route</h3>
                                 <p>AI-powered safest path to destination</p>
                             </div>
 
                             <!-- Fake Call Card -->
-                            <div class="feature-card feature-card-purple">
+                            <div class="feature-card feature-card-purple" data-feature="fake-call">
                                 <div class="feature-icon">☎️</div>
                                 <h3>Fake Call</h3>
                                 <p>Simulate an incoming call instantly</p>
                             </div>
 
                             <!-- Threat Map Card -->
-                            <div class="feature-card feature-card-wide feature-card-orange">
+                            <div class="feature-card feature-card-wide feature-card-orange" data-feature="threat-map">
                                 <div class="feature-icon-group">
                                     <div class="feature-icon-large">📍</div>
                                     <div class="feature-info">
@@ -540,7 +542,7 @@ try {
             `;
 
             // Event listeners
-            const sosBtn = app.getElementById('sos-btn');
+            const sosBtn = document.getElementById('sos-btn');
             sosBtn?.addEventListener('click', () => {
                 sosActive = !sosActive;
                 sosBtn.innerHTML = `
@@ -564,7 +566,7 @@ try {
                 }
             });
 
-            const dismissBtn = app.getElementById('dismiss-threat');
+            const dismissBtn = document.getElementById('dismiss-threat');
             dismissBtn?.addEventListener('click', () => {
                 threatDetected = false;
                 updateThreatAlert();
@@ -576,13 +578,32 @@ try {
                 Toast.show('📍 Alternative route calculated', 'info');
             });
 
-            // Feature card clicks
-            const featureCards = app.querySelectorAll('.feature-card');
-            featureCards.forEach(card => {
-                card.addEventListener('click', () => {
-                    const title = card.querySelector('h3')?.textContent;
-                    Toast.show(`✓ ${title} activated`, 'info');
-                });
+            // Feature card clicks (event delegation)
+            const featureGrid = app.querySelector('.feature-cards-grid');
+            featureGrid?.addEventListener('click', (e) => {
+                const card = e.target.closest('.feature-card');
+                if (!card) return;
+
+                const feature = card.dataset.feature;
+                const title = card.querySelector('h3')?.textContent || 'Feature';
+
+                switch (feature) {
+                    case 'threat-map':
+                        console.log('Threat map card clicked');
+                        UserPage.openThreatMap();
+                        break;
+                    case 'safe-route':
+                        // Placeholder for safe route functionality
+                        UserPage.openSafeRouteModal();
+                        break;
+                    case 'fake-call':
+                         // Placeholder for fake call functionality
+                        Toast.show(`✓ ${title} activated`, 'info');
+                        break;
+                    default:
+                        Toast.show(`✓ ${title} activated`, 'info');
+                        break;
+                }
             });
 
             // Nav button clicks
@@ -593,6 +614,321 @@ try {
                     btn.classList.add('nav-btn-active');
                 });
             });
+        },
+
+        openThreatMap() {
+            console.log('openThreatMap called');
+            const app = document.getElementById('app');
+            
+            // Create heatmap modal
+            const modal = document.createElement('div');
+            modal.className = 'heatmap-modal active';
+            modal.innerHTML = `
+                <div class="heatmap-container">
+                    <div class="heatmap-header">
+                        <h2>Threat Map</h2>
+                        <button class="heatmap-close" id="heatmap-close">✕</button>
+                    </div>
+                    <div class="heatmap-content">
+                        <div id="heatmap" class="heatmap-canvas"></div>
+                        <div class="heatmap-legend">
+                            <h4>Threat Levels</h4>
+                            <div class="legend-item">
+                                <div class="legend-color" style="background: #ffff00;"></div>
+                                <span>Low</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-color" style="background: #ff9900;"></div>
+                                <span>Medium</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-color" style="background: #ff3300;"></div>
+                                <span>High</span>
+                            </div>
+                            <div class="legend-item">
+                                <div class="legend-color" style="background: #990000;"></div>
+                                <span>Critical</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="heatmap-footer">
+                        <p class="threat-count">Loading threats...</p>
+                    </div>
+                </div>
+            `;
+            
+            app.appendChild(modal);
+            console.log('Heatmap modal appended to the DOM');
+            
+            // Close button handler
+            const closeBtn = modal.querySelector('#heatmap-close');
+            closeBtn.addEventListener('click', () => {
+                modal.classList.remove('active');
+                setTimeout(() => modal.remove(), 300);
+            });
+            
+            // Load threat data and initialize map
+            this.initThreatMap(modal);
+        },
+
+        openSafeRouteModal() {
+            const app = document.getElementById('app');
+            
+            const modal = document.createElement('div');
+            modal.className = 'heatmap-modal active';
+            modal.innerHTML = `
+                <div class="heatmap-container">
+                    <div class="heatmap-header">
+                        <h2>🧭 Safe Route Finder</h2>
+                        <button class="heatmap-close" id="route-close">✕</button>
+                    </div>
+                    <div class="heatmap-content" style="display: flex; flex-direction: column; gap: 10px; height: 100%;">
+                        <div class="route-input-group" style="display: flex; gap: 10px; padding: 10px; background: #fff; z-index: 1000;">
+                            <input type="text" id="route-dest" placeholder="Enter destination (e.g. Central Park)" style="flex: 1; padding: 12px; border-radius: 8px; border: 1px solid #ccc; font-size: 16px;">
+                            <button id="route-go" style="background: #6366f1; color: white; border: none; padding: 0 20px; border-radius: 8px; cursor: pointer; font-weight: bold;">GO</button>
+                        </div>
+                        <div id="route-map" class="heatmap-canvas" style="flex: 1; min-height: 400px; border-radius: 8px;"></div>
+                        <div class="route-stats" style="padding: 15px; background: #f3f4f6; border-radius: 8px; display: none;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <h4 style="margin: 0;">Route Analysis</h4>
+                                <span id="safety-badge" class="safe-zone-badge" style="font-size: 12px;">CALCULATING</span>
+                            </div>
+                            <p id="route-msg" style="margin: 5px 0 0 0; font-size: 14px; color: #666;">Analyzing threat patterns...</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            app.appendChild(modal);
+            
+            const closeBtn = modal.querySelector('#route-close');
+            closeBtn.addEventListener('click', () => {
+                modal.classList.remove('active');
+                setTimeout(() => modal.remove(), 300);
+            });
+
+            // Initialize map
+            this.initSafeRouteMap(modal);
+        },
+
+        initSafeRouteMap(modal) {
+            if (!navigator.geolocation) {
+                Toast.show('Geolocation not supported', 'error');
+                return;
+            }
+
+            navigator.geolocation.getCurrentPosition((position) => {
+                const userLat = position.coords.latitude;
+                const userLng = position.coords.longitude;
+                
+                const mapContainer = modal.querySelector('#route-map');
+                const map = L.map(mapContainer).setView([userLat, userLng], 14);
+                
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    attribution: '© OpenStreetMap'
+                }).addTo(map);
+                
+                // User marker
+                const userMarker = L.circleMarker([userLat, userLng], {
+                    radius: 8,
+                    fillColor: '#6366f1',
+                    color: '#fff',
+                    weight: 2,
+                    opacity: 1,
+                    fillOpacity: 1
+                }).addTo(map).bindPopup('Start Location');
+
+                // Handle Go button
+                const goBtn = modal.querySelector('#route-go');
+                const input = modal.querySelector('#route-dest');
+                const stats = modal.querySelector('.route-stats');
+                const msg = modal.querySelector('#route-msg');
+                const badge = modal.querySelector('#safety-badge');
+
+                let routeLayer = null;
+                let destMarker = null;
+
+                goBtn.addEventListener('click', async () => {
+                    const query = input.value.trim();
+                    if (!query) return;
+
+                    goBtn.textContent = '...';
+                    goBtn.disabled = true;
+                    stats.style.display = 'block';
+                    msg.textContent = 'Geocoding destination...';
+
+                    try {
+                        // 1. Geocode
+                        const geoRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`);
+                        const geoData = await geoRes.json();
+                        
+                        if (!geoData || geoData.length === 0) {
+                            throw new Error('Location not found');
+                        }
+
+                        const destLat = parseFloat(geoData[0].lat);
+                        const destLng = parseFloat(geoData[0].lon);
+
+                        // Update map bounds
+                        if (destMarker) map.removeLayer(destMarker);
+                        destMarker = L.marker([destLat, destLng]).addTo(map).bindPopup(geoData[0].display_name);
+                        
+                        const group = new L.featureGroup([userMarker, destMarker]);
+                        map.fitBounds(group.getBounds().pad(0.2));
+
+                        msg.textContent = 'Calculating safest route via AI...';
+
+                        // 2. Call Backend API
+                        const apiRes = await fetch(`${ML_API_URL}/route/calculate`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                start_lat: userLat,
+                                start_lng: userLng,
+                                end_lat: destLat,
+                                end_lng: destLng
+                            })
+                        });
+                        
+                        const routeData = await apiRes.json();
+
+                        if (routeData.success && routeData.route) {
+                            if (routeLayer) map.removeLayer(routeLayer);
+                            
+                            // Draw route
+                            const coords = routeData.route.geometry.coordinates.map(c => [c[1], c[0]]); // GeoJSON is lng,lat -> Leaflet lat,lng
+                            
+                            // Color based on risk
+                            const color = routeData.risk_score > 5 ? '#ef4444' : (routeData.risk_score > 1 ? '#f59e0b' : '#10b981');
+                            
+                            routeLayer = L.polyline(coords, {
+                                color: color,
+                                weight: 5,
+                                opacity: 0.8,
+                                lineCap: 'round'
+                            }).addTo(map);
+
+                            // Update UI
+                            badge.textContent = routeData.safety_status;
+                            badge.style.background = color;
+                            msg.innerHTML = `
+                                <strong>Best Route Found</strong><br>
+                                Risk Score: ${routeData.risk_score}<br>
+                                Analyzed ${routeData.alternatives_analyzed} alternatives.<br>
+                                Avoiding high-threat zones.
+                            `;
+                        } else {
+                            msg.textContent = 'Could not calculate a safe route.';
+                        }
+
+                    } catch (error) {
+                        console.error(error);
+                        msg.textContent = 'Error: ' + error.message;
+                        Toast.show('Route calculation failed', 'error');
+                    } finally {
+                        goBtn.textContent = 'GO';
+                        goBtn.disabled = false;
+                    }
+                });
+
+            }, (err) => {
+                Toast.show('Location access denied', 'error');
+            });
+        },
+
+        initThreatMap(modal) {
+            console.log('initThreatMap called');
+            // Get user location
+            if (navigator.geolocation) {
+                console.log('Geolocation is available, trying to get position...');
+                navigator.geolocation.getCurrentPosition(async (position) => {
+                    console.log('Geolocation position received:', position);
+                    const userLat = position.coords.latitude;
+                    const userLng = position.coords.longitude;
+                    
+                    // Initialize Leaflet map
+                    console.log('Initializing Leaflet map...');
+                    const mapContainer = modal.querySelector('#heatmap');
+                    const map = L.map(mapContainer).setView([userLat, userLng], 14);
+                    console.log('Leaflet map initialized');
+                    
+                    // Add tile layer
+                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                        attribution: '© OpenStreetMap contributors',
+                        maxZoom: 19
+                    }).addTo(map);
+                    
+                    // Add user location marker
+                    L.circleMarker([userLat, userLng], {
+                        radius: 8,
+                        fillColor: '#8b5cf6',
+                        color: '#fff',
+                        weight: 2,
+                        opacity: 1,
+                        fillOpacity: 0.8
+                    }).addTo(map).bindPopup('📍 Your Location');
+                    
+                    // Fetch threat data
+                    const apiUrl = `${ML_API_URL}/heatmap/nearby?lat=${userLat}&lng=${userLng}&radius_km=5&limit=100`;
+                    console.log('Fetching threat data from:', apiUrl);
+                    try {
+                        const response = await fetch(apiUrl);
+                        console.log('Fetch response received:', response);
+                        const data = await response.json();
+                        console.log('Threat data received:', data);
+                        
+                        if (data.zones && data.zones.length > 0) {
+                            console.log(`Found ${data.zones.length} threat zones`);
+                            // Add circles for each threat zone
+                            data.zones.forEach(zone => {
+                                const intensity = Math.min(zone.weight || zone.avg || 0.5, 1);
+                                const colors = ['#ffff00', '#ff9900', '#ff6600', '#ff3300', '#990000'];
+                                const colorIndex = Math.floor(intensity * (colors.length - 1));
+                                
+                                L.circle([zone.lat, zone.lng], {
+                                    radius: 300 + (intensity * 500),
+                                    fillColor: colors[colorIndex],
+                                    color: colors[colorIndex],
+                                    weight: 1,
+                                    opacity: 0.3,
+                                    fillOpacity: 0.3 + (intensity * 0.4)
+                                }).addTo(map).bindPopup(`
+                                    <div style="font-size: 12px;">
+                                        <strong>Threat Zone</strong><br>
+                                        Incidents: ${zone.count}<br>
+                                        Threat Level: ${(intensity * 100).toFixed(0)}%
+                                    </div>
+                                `);
+                            });
+                            
+                            // Update threat count
+                            const countElement = modal.querySelector('.threat-count');
+                            if (countElement) {
+                                countElement.textContent = `${data.zones.length} threat zone(s) detected within 5km`;
+                            }
+                        } else {
+                            console.log('No threat zones detected in the area.');
+                            const countElement = modal.querySelector('.threat-count');
+                            if (countElement) {
+                                countElement.textContent = '✓ No threats detected in your area';
+                            }
+                        }
+                    } catch (error) {
+                        console.error('Error loading threat data:', error);
+                        const countElement = modal.querySelector('.threat-count');
+                        if (countElement) {
+                            countElement.textContent = 'Unable to load threat data';
+                        }
+                        Toast.show('⚠️ Could not load threat map data', 'error');
+                    }
+                }, (error) => {
+                    console.error('Geolocation error:', error);
+                    Toast.show('📍 Location access required for threat map', 'error');
+                });
+            } else {
+                console.log('Geolocation is not supported by this browser.');
+                Toast.show('📍 Geolocation not supported', 'error');
+            }
         },
 
         teardown() {

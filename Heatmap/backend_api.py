@@ -20,6 +20,7 @@ import os
 import math
 import random
 import numpy as np
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -84,6 +85,12 @@ class SeedRequest(BaseModel):
     radius_km: float = 1.0
     mode: Optional[str] = "cctv"
     source_prefix: Optional[str] = "SEED_CAM"
+
+class RouteRequest(BaseModel):
+    start_lat: float
+    start_lng: float
+    end_lat: float
+    end_lng: float
 
 
 # ----- App -----
@@ -280,14 +287,15 @@ def _derive_incident_type(it: Dict) -> str:
         if "knife" in wt or "blade" in wt:
             return "weapon_blade"
         return "weapon"
-    bt = it.get("full_telemetry", {}).get("behavior", {})
+    full_telemetry = it.get("full_telemetry") or {}
+    bt = full_telemetry.get("behavior") or {}
     pairs = bt.get("pair_interactions", [])
     overall = bt.get("overall_risk", "")
     if any("following" in (p.get("status","")) for p in pairs):
         return "following"
     if any("approach" in (p.get("status","")) for p in pairs) or "high" in overall:
         return "rapid_approach"
-    ctx = it.get("full_telemetry", {}).get("context_factors", {})
+    ctx = full_telemetry.get("context_factors") or {}
     if ctx.get("isolation", False):
         return "isolation_risk"
     return "suspicious_activity"
@@ -300,7 +308,8 @@ def _extract_features(it: Dict) -> np.ndarray:
     gun = 1.0 if "gun" in wt else 0.0
     knife = 1.0 if ("knife" in wt or "blade" in wt) else 0.0
     is_crit = 1.0 if it.get("is_critical") else 0.0
-    ctx = it.get("full_telemetry", {}).get("context_factors", {})
+    full_telemetry = it.get("full_telemetry") or {}
+    ctx = full_telemetry.get("context_factors") or {}
     iso = 1.0 if ctx.get("isolation", False) else 0.0
     night = 1.0 if ctx.get("night_mode", False) else 0.0
     accel = 1.0 if ctx.get("sudden_acceleration", False) else 0.0
@@ -312,6 +321,56 @@ _ML_B = -0.8
 def _model_rank(features: np.ndarray) -> float:
     z = float(features.dot(_ML_W) + _ML_B)
     return max(0.0, min(1.0, _sigmoid(z)))
+
+def _get_osrm_routes(start_lat: float, start_lng: float, end_lat: float, end_lng: float) -> List[Dict]:
+    """Fetch route alternatives from OSRM public API."""
+    # OSRM uses lng,lat order
+    url = f"http://router.project-osrm.org/route/v1/driving/{start_lng},{start_lat};{end_lng},{end_lat}?overview=full&geometries=geojson&alternatives=true"
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("routes", [])
+    except Exception as e:
+        print(f"⚠️ OSRM routing failed: {e}")
+    return []
+
+def _calculate_route_risk(route_geo: Dict, incidents: List[Dict]) -> float:
+    """Calculate risk score for a route based on nearby incidents."""
+    coordinates = route_geo.get("coordinates", [])
+    if not coordinates:
+        return 0.0
+    
+    total_risk = 0.0
+    # Sample points to avoid heavy computation (every 10th point)
+    sample_points = coordinates[::10]
+    if not sample_points:
+        sample_points = coordinates
+
+    for pt in sample_points:
+        # GeoJSON is [lng, lat]
+        r_lng, r_lat = pt[0], pt[1]
+        
+        for inc in incidents:
+            i_lat = inc.get("latitude")
+            i_lng = inc.get("longitude")
+            if i_lat is None or i_lng is None:
+                continue
+                
+            # Quick bounding box check (approx 1km)
+            if abs(i_lat - r_lat) > 0.01 or abs(i_lng - r_lng) > 0.01:
+                continue
+                
+            dist = _haversine_km(r_lat, r_lng, float(i_lat), float(i_lng))
+            
+            # If incident is within 300m of route path
+            if dist < 0.3:
+                severity = _severity_weight(inc.get("threat_level", "LOW"), inc.get("threat_score", 0.0))
+                # Higher risk if closer
+                proximity_factor = (1.0 - (dist / 0.3))
+                total_risk += severity * proximity_factor
+
+    return total_risk
 
 
 # ----- API Endpoints (simple contract for backend team) -----
@@ -373,6 +432,51 @@ async def report_threat(incident: ThreatIncident):
         
     except Exception as e:
         print(f"❌ Error reporting threat: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/route/calculate")
+async def calculate_safe_route(req: RouteRequest):
+    """
+    Calculate the safest route between two points.
+    Fetches alternatives from OSRM and scores them against threat database.
+    """
+    try:
+        # 1. Get routes from OSRM
+        routes = _get_osrm_routes(req.start_lat, req.start_lng, req.end_lat, req.end_lng)
+        if not routes:
+            raise HTTPException(status_code=404, detail="No routes found")
+
+        # 2. Get active incidents (last 24h ideally, but using all active for demo)
+        # In production, use geospatial query for bounding box of route
+        incidents = _load_incidents_from_db(limit=500)
+        
+        # 3. Score each route
+        scored_routes = []
+        for route in routes:
+            risk_score = _calculate_route_risk(route["geometry"], incidents)
+            scored_routes.append({
+                "geometry": route["geometry"],
+                "duration": route["duration"],
+                "distance": route["distance"],
+                "risk_score": round(risk_score, 2)
+            })
+        
+        # 4. Sort by risk score (lowest first)
+        scored_routes.sort(key=lambda x: x["risk_score"])
+        
+        best_route = scored_routes[0]
+        is_safe = best_route["risk_score"] < 1.0
+        
+        return {
+            "success": True,
+            "route": best_route,
+            "alternatives_analyzed": len(routes),
+            "safety_status": "SAFE" if is_safe else "CAUTION",
+            "risk_score": best_route["risk_score"]
+        }
+
+    except Exception as e:
+        print(f"❌ Error calculating route: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/sos")
