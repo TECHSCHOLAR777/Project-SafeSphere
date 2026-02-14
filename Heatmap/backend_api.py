@@ -56,7 +56,7 @@ SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ----- Models -----
 class ThreatIncident(BaseModel):
-    incident_id: str
+    incident_id: Optional[str] = None
     timestamp: str
     threat_level: str  # LOW, MEDIUM, HIGH, CRITICAL
     threat_score: float
@@ -100,8 +100,8 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origin_regex=".*",  # Allows all origins (including dynamic Codespaces URLs)
+    allow_credentials=True,   # Allows cookies/auth headers
     allow_methods=["*"],
     allow_headers=["*"],
 )

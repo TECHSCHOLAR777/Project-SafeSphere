@@ -795,6 +795,118 @@ class ActionHandler {
             Toast.show('❌ Failed to send SOS: ' + error.message, 'error', 5000);
         }
     }
+
+    static async sendVoiceSOS(voiceText) {
+        Toast.show('🚨 Voice SOS detected! Sending alert...', 'error', 5000);
+        console.log(`🚨 Voice SOS detected! Sending alert for text: "${voiceText}"`);
+        
+        try {
+            // Get location
+            const location = await new Promise((resolve) => {
+                if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                        (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }),
+                        () => resolve({ lat: 0, lng: 0, accuracy: 0 }) // Fallback
+                    );
+                } else {
+                    resolve({ lat: 0, lng: 0, accuracy: 0 }); // Fallback
+                }
+            });
+
+            // Create SOS payload for /api/sos
+            const sosData = {
+                type: 'Voice SOS',
+                details: `Voice SOS Detected: "${voiceText}"`,
+                location: {
+                    lat: location.lat,
+                    lng: location.lng
+                },
+                severity: 'CRITICAL'
+            };
+
+            // Send to backend /api/sos endpoint
+            const response = await fetch(`${ML_API_URL}/api/sos`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(sosData)
+            });
+
+            const result = await response.json();
+
+            if (response.ok) {
+                Toast.show(`✅ Voice SOS Alert sent! Incident ID: ${result.incident_id}`, 'success', 5000);
+                console.log('Voice SOS Response:', result);
+            } else {
+                Toast.show(`⚠️ SOS sent, but backend reported an error: ${result.detail || 'Unknown error'}`, 'error', 5000);
+                console.error('Backend error on voice SOS:', result);
+            }
+        } catch (error) {
+            console.error('Error sending Voice SOS:', error);
+            Toast.show('❌ Failed to send Voice SOS: ' + error.message, 'error', 5000);
+        }
+    }
+}
+
+// ============================================
+// VOICE SECURITY AI
+// ============================================
+
+class VoiceSecurity {
+    static init() {
+        if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+            console.warn('Voice SOS: Web Speech API not supported in this browser.');
+            return;
+        }
+
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = false;
+        recognition.lang = 'en-US';
+
+        recognition.onstart = () => {
+            console.log('🎙️ Voice SOS: Microphone active. Listening for keywords (e.g., "help me")...');
+        };
+
+        recognition.onresult = (event) => {
+            const last = event.results.length - 1;
+            const text = event.results[last][0].transcript.toLowerCase().trim();
+            console.log(`👂 Voice SOS Heard: "${text}"`);
+
+            if (text.includes('help me') || text.includes('save me') || text.includes('emergency') || text.includes('threatening')) {
+                console.warn(`🚨 Voice SOS: Threat detected ("${text}")! Sending alert directly...`);
+                ActionHandler.sendVoiceSOS(text);
+            }
+        };
+
+        recognition.onerror = (event) => {
+            if (event.error === 'no-speech') return;
+            console.error('Voice SOS Error:', event.error);
+            if (event.error === 'not-allowed') {
+                console.warn('Voice SOS: Microphone permission denied. Please enable microphone access.');
+                Toast.show('⚠️ Enable microphone for Voice SOS', 'warning');
+            }
+        };
+
+        recognition.onend = () => {
+            console.log('🎙️ Voice SOS: Session ended. Restarting...');
+            try {
+                recognition.start();
+            } catch (e) {
+                // Ignore errors if already started
+            }
+        };
+
+        // Attempt to start immediately
+        console.log('🎙️ Voice SOS: Initializing...');
+        try {
+            recognition.start();
+        } catch (e) {
+            console.error('Voice SOS: Failed to start:', e);
+        }
+        
+        window.voiceSecurity = recognition;
+    }
 }
 
 // ============================================
@@ -857,6 +969,10 @@ try {
     // Initialize responsive menu
     MenuHandler.init();
     console.log('✅ Menu ready');
+
+    // Initialize Voice Security
+    VoiceSecurity.init();
+    console.log('✅ Voice Security ready');
 
     // Ensure an application container exists for role pages
     if (!document.getElementById('app')) {
@@ -1634,6 +1750,18 @@ try {
                 ];
             }
 
+            // Fetch total incidents count
+            let totalIncidentsCount = 45;
+            try {
+                const response = await fetch(`${ML_API_URL}/incidents?limit=1000`);
+                const data = await response.json();
+                if (data.count !== undefined) {
+                    totalIncidentsCount = data.count;
+                }
+            } catch (error) {
+                console.error('Failed to fetch total incidents count:', error);
+            }
+
             const recentLogs = [
                 { id: 101, type: 'SOS Alert', location: 'Broadway St', time: '10:42 AM', details: 'User reported feeling unsafe. Patrol unit #42 responded.', status: 'Resolved' },
                 { id: 102, type: 'Geofence Breach', location: 'Times Square', time: '09:15 AM', details: 'Child safety watch exited safe zone. Parent notified.', status: 'Resolved' },
@@ -1642,7 +1770,7 @@ try {
 
             const stats = {
                 activeUnits: 12,
-                totalIncidents: 45,
+                totalIncidents: totalIncidentsCount,
                 avgResponse: '4m 30s'
             };
 
@@ -2321,6 +2449,17 @@ try {
     window.setRole = (r) => {
         localStorage.setItem('safesphere_role', r);
         document.body.dataset.role = r;
+
+        const app = document.getElementById('app');
+        const heroSection = document.querySelector('.hero') || document.querySelector('.heroes');
+        if (app && heroSection) {
+            if (r === 'user') {
+                heroSection.parentNode.insertBefore(app, heroSection.nextSibling);
+            } else {
+                document.body.appendChild(app);
+            }
+        }
+
         loadRolePage(r, { role: r });
     };
 
@@ -2346,7 +2485,7 @@ try {
             select.appendChild(opt);
         });
 
-        const currentRole = document.body.dataset.role || localStorage.getItem('safesphere_role') || 'user';
+        const currentRole = 'user';
         select.value = currentRole;
 
         select.addEventListener('change', (e) => {
@@ -2362,7 +2501,7 @@ try {
     })();
 
     // Determine role: prefer body[data-role] then localStorage, default 'user'
-    const role = document.body.dataset.role || localStorage.getItem('safesphere_role') || 'user';
+    const role = 'user';
     loadRolePage(role, { role });
 
     console.log('✅ SafeSphere online!');

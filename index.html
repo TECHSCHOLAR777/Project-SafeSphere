@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+L<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -10,6 +10,9 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
     <!-- Leaflet Heatmap Plugin -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-heatmap/1.0.4/leaflet-heatmap.min.js"></script>
+    hidesos{
+        display: none;
+    }
 </head>
 <body>
     <!-- Navigation Bar -->
@@ -65,12 +68,6 @@
                 </p>
 
                 <div class="hero-buttons">
-                    <button class="btn btn-danger btn-lg">
-                        Take a Safe Route
-                    </button>
-                    <button class="btn btn-secondary btn-lg">
-                        Find Safe Places Nearby →
-                    </button>
                 </div>
             </div>
 
@@ -86,12 +83,12 @@
                 </div>
             </div>
         </section>
-
+        <div id="app"></div>
         <!-- SOS Section -->
         <section class="sos-section">
             <div class="sos-divider"></div>
             <div class="sos-container">
-                <button class="sos-button" id="sosButton">
+                <button class="sos-button" id="sosButton" class="hidesos">
                     <span class="sos-text">SOS</span>
                     <span class="sos-subtext">Tap to Alert</span>
                 </button>
